@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
 
 interface FileNode {
@@ -89,7 +89,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
         onFileSelect(mainFile.path);
       }
     }
-  }, [fileTree, projectId]);
+  }, [fileTree, projectId, selectedFile, onFileSelect]);
 
   const toggleFolder = (path: string) => {
     const newExpanded = new Set(expandedFolders);
@@ -125,7 +125,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     }
   };
 
-  const handleSaveFile = async () => {
+  const handleSaveFile = useCallback(async () => {
     if (!selectedFile || !projectId) return;
     
     try {
@@ -142,7 +142,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     } catch (error) {
       console.error('Failed to save file:', error);
     }
-  };
+  }, [fileContent, onFileUpdate, projectId, selectedFile]);
 
   const handleNewFile = async () => {
     if (!projectId || !newFileName.trim()) return;
@@ -253,7 +253,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedFile, fileContent]);
+  }, [handleSaveFile]);
 
   const getFileIcon = (fileName: string) => {
     const ext = fileName.split('.').pop()?.toLowerCase();

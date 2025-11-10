@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import { useState, useEffect } from 'react';
 
 interface PreviewFrameProps {
@@ -477,10 +478,13 @@ export default function PreviewFrame({
                 <p className="text-xs text-gray-400">Open the Expo Go app and scan this QR code</p>
               </div>
               <div className="bg-white p-4 rounded-lg">
-                <img 
+                <Image
                   src={`https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(url)}`}
                   alt="QR Code"
+                  width={250}
+                  height={250}
                   className="w-full h-auto"
+                  unoptimized
                 />
               </div>
               <div className="mt-4 space-y-2">
