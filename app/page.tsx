@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import ChatPanel from '@/components/ChatPanel';
 import CodeEditor from '@/components/CodeEditor';
 import PreviewFrame from '@/components/PreviewFrame';
@@ -42,27 +42,21 @@ export default function Home() {
     type: 'info',
     message: '',
   });
+  const [showTemplateModal, setShowTemplateModal] = useState(false);
+  const [templates, setTemplates] = useState<any[]>([]);
 
-  // Resizable panel widths (in percentages)
-  const [leftWidth, setLeftWidth] = useState(15);
-  const [rightWidth, setRightWidth] = useState(15);
-  const [isDraggingLeft, setIsDraggingLeft] = useState(false);
-  const [isDraggingRight, setIsDraggingRight] = useState(false);
+  // Resizable panel widths (in percentages) - improved layout
+  const [leftWidth, setLeftWidth] = useState(24); // Chat panel
+  const [centerWidth, setCenterWidth] = useState(51); // Code editor
+  const rightWidth = 24; // Preview panel (fixed)
+  const rightMargin = 1; // Right margin
+  const [isResizingLeft, setIsResizingLeft] = useState(false);
 
   // File watching state
   const [lastFileTreeHash, setLastFileTreeHash] = useState<string>('');
   const [previewKey, setPreviewKey] = useState(0);
   const fileWatchIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-
-  const showNotification = useCallback((type: NotificationType, message: string, suggestion?: string) => {
-    setNotification({
-      show: true,
-      type,
-      message,
-      suggestion,
-    });
-  }, []);
 
   const handleEdit = async (promptText: string) => {
     if (!projectId) return;
@@ -199,7 +193,7 @@ export default function Home() {
     }
   };
 
-  const loadFileTree = useCallback(async (projId: string, silent = false) => {
+  const loadFileTree = async (projId: string, silent = false) => {
     try {
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/files/${projId}`);
       if (response.ok) {
@@ -225,15 +219,13 @@ export default function Home() {
     } catch (error) {
       console.error('Failed to load file tree:', error);
     }
-  }, [lastFileTreeHash, showNotification]);
-
-  const statusValue = status?.status;
+  };
 
   // Start file watching when project is active (WebSocket + Polling fallback)
   useEffect(() => {
-    if (projectId && statusValue === 'ready') {
+    if (projectId && status?.status === 'ready') {
       // Initial load
-      void loadFileTree(projectId, true);
+      loadFileTree(projectId, true);
       
       // Try WebSocket first for real-time updates
       const wsUrl = `${(process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080').replace('http', 'ws')}/ws/watch/${projectId}`;
@@ -252,7 +244,7 @@ export default function Home() {
               console.log('Files changed (WebSocket):', data.files);
               
               // Reload file tree
-              void loadFileTree(projectId);
+              loadFileTree(projectId);
               
               // Refresh preview
               setPreviewKey(prev => prev + 1);
@@ -280,7 +272,7 @@ export default function Home() {
       
       // Fallback: Start polling for file changes every 5 seconds
       fileWatchIntervalRef.current = setInterval(() => {
-        void loadFileTree(projectId);
+        loadFileTree(projectId);
       }, 5000);
       
       console.log('Started file watching for project:', projectId);
@@ -307,7 +299,7 @@ export default function Home() {
         clearInterval(fileWatchIntervalRef.current);
       }
     };
-  }, [projectId, statusValue, loadFileTree, showNotification]);
+  }, [projectId, status?.status]);
 
   // Handle manual refresh from preview frame
   useEffect(() => {
@@ -427,59 +419,95 @@ export default function Home() {
     }
   };
 
+  const showNotification = (type: NotificationType, message: string, suggestion?: string) => {
+    setNotification({
+      show: true,
+      type,
+      message,
+      suggestion,
+    });
+  };
+
   const currentStatus: 'idle' | 'generating' | 'ready' | 'error' = 
     status?.status === 'ready' ? 'ready' :
     status?.status === 'error' ? 'error' :
     isGenerating ? 'generating' : 'idle';
 
-  // Handle mouse drag for left divider
-  const handleLeftMouseDown = () => {
-    setIsDraggingLeft(true);
-  };
+  // Load templates on mount
+  useEffect(() => {
+    loadTemplates();
+  }, []);
 
-  const handleLeftMouseMove = (e: React.MouseEvent) => {
-    if (!isDraggingLeft) return;
-    const containerWidth = window.innerWidth;
-    const newLeftWidth = (e.clientX / containerWidth) * 100;
-    
-    // Constrain between 10% and 40%
-    if (newLeftWidth >= 10 && newLeftWidth <= 40) {
-      setLeftWidth(newLeftWidth);
+  const loadTemplates = async () => {
+    try {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/templates`);
+      if (response.ok) {
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          const data = await response.json();
+          setTemplates(data.templates || []);
+        } else {
+          console.warn('Templates endpoint returned non-JSON response');
+          setTemplates([]);
+        }
+      } else {
+        console.warn(`Templates endpoint returned status ${response.status}`);
+        setTemplates([]);
+      }
+    } catch (error) {
+      console.error('Failed to load templates:', error);
+      setTemplates([]);
     }
   };
 
-  const handleLeftMouseUp = () => {
-    setIsDraggingLeft(false);
-  };
+  const handleApplyTemplate = async (templateId: string) => {
+    if (!projectId) {
+      showNotification('error', 'No project loaded', 'Please create or load a project first');
+      return;
+    }
 
-  // Handle mouse drag for right divider
-  const handleRightMouseDown = () => {
-    setIsDraggingRight(true);
-  };
+    try {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/apply-template`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'X-API-Key': 'dev-key-12345'
+        },
+        body: JSON.stringify({ 
+          project_id: projectId,
+          template_id: templateId
+        }),
+      });
 
-  const handleRightMouseMove = (e: React.MouseEvent) => {
-    if (!isDraggingRight) return;
-    const containerWidth = window.innerWidth;
-    const newRightWidth = ((containerWidth - e.clientX) / containerWidth) * 100;
-    
-    // Constrain between 10% and 40%
-    if (newRightWidth >= 10 && newRightWidth <= 40) {
-      setRightWidth(newRightWidth);
+      if (!response.ok) {
+        throw new Error('Failed to apply template');
+      }
+
+      const data = await response.json();
+      
+      // Reload file tree
+      await loadFileTree(projectId);
+      
+      // Refresh preview
+      setPreviewKey(prev => prev + 1);
+      
+      // Add success message
+      const successMessage: Message = {
+        id: Date.now().toString(),
+        role: 'assistant',
+        content: `✅ Template Applied!\n\n${data.message}\n\nFiles updated: ${data.files_updated.length}`,
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, successMessage]);
+      
+      showNotification('success', 'Template applied!', `${data.files_updated.length} files updated`);
+      setShowTemplateModal(false);
+      
+    } catch (error: any) {
+      console.error('Template application error:', error);
+      showNotification('error', 'Failed to apply template', error.message);
     }
   };
-
-  const handleRightMouseUp = () => {
-    setIsDraggingRight(false);
-  };
-
-  // Global mouse up handler
-  const handleGlobalMouseUp = () => {
-    setIsDraggingLeft(false);
-    setIsDraggingRight(false);
-  };
-
-  // Calculate center width
-  const centerWidth = 100 - leftWidth - rightWidth;
 
   return (
     <div className="h-screen flex flex-col bg-black">
@@ -503,34 +531,37 @@ export default function Home() {
               currentProjectId={projectId}
             />
           </div>
-          {projectId && (
-            <button
-              onClick={handleDownload}
-              className="flex items-center space-x-2 bg-black hover:bg-gray-900 text-orange-400 px-4 py-2 rounded-lg text-sm font-medium transition-all shadow-md hover:shadow-lg"
-            >
-              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-              </svg>
-              <span>Download Project</span>
-            </button>
-          )}
+          <div className="flex items-center gap-3">
+            {projectId && (
+              <>
+                <button
+                  onClick={() => setShowTemplateModal(true)}
+                  className="flex items-center space-x-2 bg-black hover:bg-gray-900 text-orange-400 px-4 py-2 rounded-lg text-sm font-medium transition-all shadow-md hover:shadow-lg"
+                >
+                  <span>🎨</span>
+                  <span>Browse Templates</span>
+                </button>
+                <button
+                  onClick={handleDownload}
+                  className="flex items-center space-x-2 bg-black hover:bg-gray-900 text-orange-400 px-4 py-2 rounded-lg text-sm font-medium transition-all shadow-md hover:shadow-lg"
+                >
+                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  <span>Download Project</span>
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </header>
 
-      {/* 3-Panel Resizable Layout */}
-      <div 
-        className="flex-1 flex overflow-hidden border-t-2 border-orange-500 relative select-none"
-        onMouseMove={(e) => {
-          handleLeftMouseMove(e);
-          handleRightMouseMove(e);
-        }}
-        onMouseUp={handleGlobalMouseUp}
-        onMouseLeave={handleGlobalMouseUp}
-      >
+      {/* 3-Panel Resizable Layout with improved spacing */}
+      <div className="flex-1 flex overflow-hidden border-t-2 border-orange-500 relative">
         {/* Left Panel - Chat */}
         <div 
-          className="overflow-hidden border-r border-orange-500/30"
-          style={{ width: `${leftWidth}%`, minWidth: '200px' }}
+          className="overflow-hidden shadow-lg relative"
+          style={{ width: `${leftWidth}%` }}
         >
           <ChatPanel
             onSubmit={handleGenerate}
@@ -542,23 +573,51 @@ export default function Home() {
           />
         </div>
 
-        {/* Left Resizer */}
+        {/* Vertical Resizer between Chat and Editor */}
         <div
-          className={`w-1 bg-orange-500/30 hover:bg-orange-500 cursor-col-resize relative group transition-colors ${
-            isDraggingLeft ? 'bg-orange-500' : ''
-          }`}
-          onMouseDown={handleLeftMouseDown}
+          className={`w-1 bg-orange-500/20 hover:bg-orange-500/60 cursor-col-resize transition-colors relative group ${isResizingLeft ? 'bg-orange-500' : ''}`}
+          onMouseDown={(e) => {
+            setIsResizingLeft(true);
+            const startX = e.clientX;
+            const startLeftWidth = leftWidth;
+            const startCenterWidth = centerWidth;
+            
+            const handleMouseMove = (e: MouseEvent) => {
+              const containerWidth = window.innerWidth;
+              const deltaX = e.clientX - startX;
+              const deltaPercent = (deltaX / containerWidth) * 100;
+              
+              const newLeftWidth = Math.max(15, Math.min(40, startLeftWidth + deltaPercent));
+              const newCenterWidth = Math.max(30, Math.min(60, startCenterWidth - deltaPercent));
+              
+              setLeftWidth(newLeftWidth);
+              setCenterWidth(newCenterWidth);
+            };
+            
+            const handleMouseUp = () => {
+              setIsResizingLeft(false);
+              document.removeEventListener('mousemove', handleMouseMove);
+              document.removeEventListener('mouseup', handleMouseUp);
+            };
+            
+            document.addEventListener('mousemove', handleMouseMove);
+            document.addEventListener('mouseup', handleMouseUp);
+          }}
         >
-          {/* Resizer Handle */}
-          <div className="absolute inset-y-0 -left-1 -right-1 flex items-center justify-center">
-            <div className="w-1 h-12 bg-gradient-to-r from-orange-500 to-yellow-500 rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"></div>
+          {/* Resize indicator */}
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
+            <div className="flex flex-col gap-1 bg-orange-500 rounded px-0.5 py-2">
+              <div className="w-0.5 h-3 bg-white rounded"></div>
+              <div className="w-0.5 h-3 bg-white rounded"></div>
+              <div className="w-0.5 h-3 bg-white rounded"></div>
+            </div>
           </div>
         </div>
 
         {/* Center Panel - Code Editor */}
         <div 
-          className="overflow-hidden border-r border-orange-500/30"
-          style={{ width: `${centerWidth}%`, minWidth: '300px' }}
+          className="overflow-hidden border-r border-orange-500/30 shadow-lg"
+          style={{ width: `${centerWidth}%` }}
         >
           <CodeEditor
             projectId={projectId}
@@ -587,23 +646,10 @@ export default function Home() {
           />
         </div>
 
-        {/* Right Resizer */}
-        <div
-          className={`w-1 bg-orange-500/30 hover:bg-orange-500 cursor-col-resize relative group transition-colors ${
-            isDraggingRight ? 'bg-orange-500' : ''
-          }`}
-          onMouseDown={handleRightMouseDown}
-        >
-          {/* Resizer Handle */}
-          <div className="absolute inset-y-0 -left-1 -right-1 flex items-center justify-center">
-            <div className="w-1 h-12 bg-gradient-to-r from-orange-500 to-yellow-500 rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"></div>
-          </div>
-        </div>
-
-        {/* Right Panel - Preview */}
+        {/* Right Panel - Preview (24%) with 1% right margin */}
         <div 
-          className="overflow-hidden"
-          style={{ width: `${rightWidth}%`, minWidth: '200px' }}
+          className="overflow-hidden shadow-lg"
+          style={{ width: `${rightWidth}%`, marginRight: `${rightMargin}%` }}
         >
           <PreviewFrame
             url={previewUrl}
@@ -623,6 +669,169 @@ export default function Home() {
           suggestion={notification.suggestion}
           onClose={() => setNotification({ ...notification, show: false })}
         />
+      )}
+
+      {/* Template Browser Modal */}
+      {showTemplateModal && (
+        <>
+          <div 
+            className="fixed inset-0 bg-black/90 backdrop-blur-sm z-50" 
+            onClick={() => setShowTemplateModal(false)}
+          />
+          <div className="fixed inset-4 md:inset-8 lg:inset-16 z-50 bg-gray-900 border-2 border-orange-500/50 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+            <div className="p-6 border-b border-orange-500/30 bg-gradient-to-r from-orange-500/10 to-yellow-500/10">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-2xl font-bold text-white flex items-center gap-3">
+                    <span>🎨</span>
+                    Browse & Apply Templates
+                  </h3>
+                  <p className="text-sm text-gray-400 mt-1">Select a color scheme to instantly update your app</p>
+                </div>
+                <button
+                  onClick={() => setShowTemplateModal(false)}
+                  className="p-2 hover:bg-gray-800 rounded-lg text-gray-400 hover:text-white transition-all"
+                >
+                  <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {templates.map((template) => (
+                  <div 
+                    key={template.id}
+                    className="group relative rounded-2xl overflow-hidden transition-all hover:shadow-2xl hover:scale-105"
+                    style={{
+                      background: `linear-gradient(135deg, ${template.colors.background} 0%, ${template.colors.surface} 100%)`,
+                      borderWidth: '2px',
+                      borderStyle: 'solid',
+                      borderColor: template.colors.primary + '50'
+                    }}
+                  >
+                    <div className="p-6">
+                      {/* Header */}
+                      <div className="flex items-center gap-3 mb-4">
+                        <div 
+                          className="w-16 h-16 rounded-xl flex items-center justify-center shadow-lg"
+                          style={{ backgroundColor: template.colors.primary }}
+                        >
+                          <div 
+                            className="w-8 h-8 rounded-lg shadow-inner"
+                            style={{ backgroundColor: template.colors.secondary }}
+                          />
+                        </div>
+                        <div>
+                          <h4 className="text-lg font-bold" style={{ color: template.colors.text_primary }}>
+                            {template.name}
+                          </h4>
+                          <p className="text-xs" style={{ color: template.colors.text_secondary }}>
+                            {template.id}
+                          </p>
+                        </div>
+                      </div>
+                      
+                      {/* Description */}
+                      <p className="text-sm mb-4" style={{ color: template.colors.text_secondary }}>
+                        {template.description}
+                      </p>
+                      
+                      {/* Color Palette */}
+                      <div className="mb-4">
+                        <p className="text-xs font-semibold mb-2" style={{ color: template.colors.text_secondary }}>
+                          Color Palette
+                        </p>
+                        <div className="grid grid-cols-5 gap-2">
+                          <div className="space-y-1">
+                            <div 
+                              className="h-10 rounded-lg shadow-md"
+                              style={{ backgroundColor: template.colors.primary }}
+                              title="Primary"
+                            />
+                            <p className="text-xs text-center" style={{ color: template.colors.text_secondary }}>Primary</p>
+                          </div>
+                          <div className="space-y-1">
+                            <div 
+                              className="h-10 rounded-lg shadow-md"
+                              style={{ backgroundColor: template.colors.secondary }}
+                              title="Secondary"
+                            />
+                            <p className="text-xs text-center" style={{ color: template.colors.text_secondary }}>Second</p>
+                          </div>
+                          <div className="space-y-1">
+                            <div 
+                              className="h-10 rounded-lg shadow-md"
+                              style={{ backgroundColor: template.colors.accent }}
+                              title="Accent"
+                            />
+                            <p className="text-xs text-center" style={{ color: template.colors.text_secondary }}>Accent</p>
+                          </div>
+                          <div className="space-y-1">
+                            <div 
+                              className="h-10 rounded-lg shadow-md border"
+                              style={{ 
+                                backgroundColor: template.colors.surface,
+                                borderColor: template.colors.border
+                              }}
+                              title="Surface"
+                            />
+                            <p className="text-xs text-center" style={{ color: template.colors.text_secondary }}>Surface</p>
+                          </div>
+                          <div className="space-y-1">
+                            <div 
+                              className="h-10 rounded-lg shadow-md"
+                              style={{ backgroundColor: template.colors.text_primary }}
+                              title="Text"
+                            />
+                            <p className="text-xs text-center" style={{ color: template.colors.text_secondary }}>Text</p>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      {/* UI Preview */}
+                      <div className="mb-4 rounded-lg overflow-hidden border-2" style={{ borderColor: template.colors.border }}>
+                        <iframe
+                          src={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/template-preview/${template.id}`}
+                          className="w-full h-64 border-0"
+                          title={`${template.name} Preview`}
+                          sandbox="allow-same-origin"
+                        />
+                      </div>
+                      
+                      {/* Apply Button */}
+                      <button
+                        onClick={() => handleApplyTemplate(template.id)}
+                        className="w-full py-3 font-semibold rounded-lg transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
+                        style={{ 
+                          backgroundColor: template.colors.primary,
+                          color: template.colors.surface
+                        }}
+                      >
+                        Apply {template.name}
+                      </button>
+                    </div>
+                    
+                    {/* Hover Effect Overlay */}
+                    <div 
+                      className="absolute inset-0 opacity-0 group-hover:opacity-10 transition-opacity pointer-events-none"
+                      style={{ backgroundColor: template.colors.primary }}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+            
+            {/* Footer */}
+            <div className="p-4 border-t border-orange-500/30 bg-black/50">
+              <p className="text-xs text-center text-gray-500">
+                💡 Templates instantly update all colors across your entire app
+              </p>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

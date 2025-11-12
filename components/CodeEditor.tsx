@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 
 interface FileNode {
@@ -31,7 +31,13 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(true);
+  const [terminalHeight, setTerminalHeight] = useState(200);
+  const [terminalLogs, setTerminalLogs] = useState<Array<{type: 'info' | 'error' | 'success' | 'warning', message: string, timestamp: Date}>>([]);
+  const [isResizing, setIsResizing] = useState(false);
   const editorRef = useRef<any>(null);
+  const terminalRef = useRef<HTMLDivElement>(null);
 
   // Auto-expand folders and select main file when project loads
   useEffect(() => {
@@ -89,7 +95,62 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
         onFileSelect(mainFile.path);
       }
     }
-  }, [fileTree, projectId, selectedFile, onFileSelect]);
+  }, [fileTree, projectId]);
+
+  // Fetch project logs and status
+  useEffect(() => {
+    if (!projectId) return;
+
+    // Add initial log
+    setTerminalLogs([{
+      type: 'info' as const,
+      message: `✓ Project ${projectId} loaded successfully`,
+      timestamp: new Date()
+    }, {
+      type: 'info' as const,
+      message: `📁 File explorer ready - ${fileTree.length} items`,
+      timestamp: new Date()
+    }]);
+
+    // Poll for project status every 15 seconds
+    const pollInterval = setInterval(async () => {
+      try {
+        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/project-status/${projectId}`);
+        if (response.ok) {
+          const data = await response.json();
+          
+          // Only add status log if status changed or has useful info
+          if (data.status && (data.port || data.url)) {
+            setTerminalLogs(prev => {
+              // Check if last log is similar to avoid spam
+              const lastLog = prev[prev.length - 1];
+              const newMessage = `Status: ${data.status}${data.port ? ` | Port: ${data.port}` : ''}${data.url ? ` | URL: ${data.url}` : ''}`;
+              
+              if (!lastLog || !lastLog.message.includes(newMessage)) {
+                return [...prev, {
+                  type: (data.status === 'ready' ? 'success' : 'info') as 'success' | 'info',
+                  message: newMessage,
+                  timestamp: new Date()
+                }].slice(-50); // Keep last 50 logs
+              }
+              return prev;
+            });
+          }
+        }
+      } catch (error) {
+        // Silently ignore errors
+      }
+    }, 15000);
+
+    return () => clearInterval(pollInterval);
+  }, [projectId, fileTree.length]);
+
+  // Auto-scroll terminal to bottom when new logs arrive
+  useEffect(() => {
+    if (terminalRef.current) {
+      terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+    }
+  }, [terminalLogs]);
 
   const toggleFolder = (path: string) => {
     const newExpanded = new Set(expandedFolders);
@@ -125,8 +186,14 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     }
   };
 
-  const handleSaveFile = useCallback(async () => {
+  const handleSaveFile = async () => {
     if (!selectedFile || !projectId) return;
+    
+    setTerminalLogs(prev => [...prev, {
+      type: 'info' as const,
+      message: `Saving ${selectedFile}...`,
+      timestamp: new Date()
+    }]);
     
     try {
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/files/${projectId}/${selectedFile}`, {
@@ -138,11 +205,27 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
       if (response.ok) {
         setHasUnsavedChanges(false);
         onFileUpdate?.(selectedFile, fileContent);
+        setTerminalLogs(prev => [...prev, {
+          type: 'success' as const,
+          message: `✓ Saved ${selectedFile}`,
+          timestamp: new Date()
+        }]);
+      } else {
+        setTerminalLogs(prev => [...prev, {
+          type: 'error' as const,
+          message: `Failed to save ${selectedFile}`,
+          timestamp: new Date()
+        }]);
       }
     } catch (error) {
       console.error('Failed to save file:', error);
+      setTerminalLogs(prev => [...prev, {
+        type: 'error' as const,
+        message: `Error saving ${selectedFile}: ${error}`,
+        timestamp: new Date()
+      }]);
     }
-  }, [fileContent, onFileUpdate, projectId, selectedFile]);
+  };
 
   const handleNewFile = async () => {
     if (!projectId || !newFileName.trim()) return;
@@ -253,7 +336,18 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleSaveFile]);
+  }, [selectedFile, fileContent]);
+
+  const isImageFile = (fileName: string) => {
+    const ext = fileName.split('.').pop()?.toLowerCase();
+    return ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico'].includes(ext || '');
+  };
+
+  const getImageUrl = (filePath: string) => {
+    if (!projectId) return '';
+    // Construct URL to serve the image from backend
+    return `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/files/${projectId}/${filePath}`;
+  };
 
   const getFileIcon = (fileName: string) => {
     const ext = fileName.split('.').pop()?.toLowerCase();
@@ -277,6 +371,9 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
       case 'jpeg':
       case 'gif':
       case 'svg':
+      case 'webp':
+      case 'bmp':
+      case 'ico':
         return '🖼️';
       default:
         return '📄';
@@ -284,7 +381,15 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
   };
 
   const renderFileTree = (nodes: FileNode[], level: number = 0) => {
-    return nodes.map((node) => (
+    // Sort: folders first (alphabetically), then files (alphabetically)
+    const sortedNodes = [...nodes].sort((a, b) => {
+      if (a.type === b.type) {
+        return a.name.localeCompare(b.name);
+      }
+      return a.type === 'folder' ? -1 : 1;
+    });
+    
+    return sortedNodes.map((node) => (
       <div key={node.path}>
         {renameTarget === node.path ? (
           <div className="flex items-center px-2 py-1" style={{ paddingLeft: `${level * 12 + 8}px` }}>
@@ -303,8 +408,8 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
           </div>
         ) : (
           <div
-            className={`flex items-center px-2 py-1 hover:bg-gray-900 cursor-pointer transition-colors ${
-              selectedFile === node.path ? 'bg-gradient-to-r from-orange-500/20 to-yellow-500/20 border-l-2 border-orange-500' : ''
+            className={`flex items-center px-2 py-1.5 hover:bg-gray-900/80 cursor-pointer transition-all ${
+              selectedFile === node.path ? 'bg-gradient-to-r from-orange-500/30 to-yellow-500/20 border-l-4 border-orange-500 shadow-md' : ''
             }`}
             style={{ paddingLeft: `${level * 12 + 8}px` }}
             onClick={() => handleFileClick(node)}
@@ -343,14 +448,16 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
   };
 
   return (
-    <div className="h-full flex flex-col bg-gray-900">
-      {/* Header */}
-      <div className="p-3 border-b border-orange-500/30 bg-black flex items-center justify-between">
-        <div className="flex items-center space-x-2">
-          <svg className="h-5 w-5 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-          </svg>
-          <h2 className="text-sm font-semibold text-white">Explorer</h2>
+    <div className="h-full flex flex-col bg-gradient-to-b from-gray-900 via-gray-900 to-black">
+      {/* Header with gradient */}
+      <div className="p-3 border-b-2 border-orange-500/40 bg-gradient-to-r from-black via-gray-900 to-black shadow-lg flex items-center justify-between">
+        <div className="flex items-center space-x-3">
+          <div className="bg-gradient-to-br from-orange-500 to-yellow-500 p-2 rounded-lg shadow-md">
+            <svg className="h-5 w-5 text-black" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            </svg>
+          </div>
+          <h2 className="text-lg font-bold text-white">Code Editor</h2>
         </div>
         <div className="flex items-center gap-2">
           {projectId && fileTree.length > 0 && (
@@ -382,9 +489,13 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
         </div>
       </div>
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* File Tree */}
-        <div className="w-64 border-r border-orange-500/30 overflow-y-auto bg-black">
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* File Tree with improved styling */}
+        <div 
+          className={`border-r-2 border-orange-500/30 overflow-y-auto bg-gradient-to-b from-black via-gray-950 to-black shadow-inner transition-all duration-300 ${
+            isSidebarCollapsed ? 'w-0' : 'w-64'
+          }`}
+        >
           {fileTree.length === 0 ? (
             <div className="p-4 text-center text-gray-500 text-sm">
               <div className="bg-gray-900 rounded-full p-3 w-14 h-14 mx-auto mb-2 flex items-center justify-center">
@@ -399,17 +510,36 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
           )}
         </div>
 
-        {/* Code View */}
-        <div className="flex-1 flex flex-col overflow-hidden bg-gray-900">
+        {/* Collapse/Expand Button */}
+        <button
+          onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+          className="absolute left-0 top-1/2 -translate-y-1/2 z-10 bg-gray-800 hover:bg-gray-700 border border-orange-500/40 rounded-r-lg p-1.5 transition-all shadow-lg"
+          style={{ left: isSidebarCollapsed ? '0' : '256px' }}
+          title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          <svg 
+            className={`h-4 w-4 text-orange-400 transition-transform ${isSidebarCollapsed ? '' : 'rotate-180'}`}
+            fill="none" 
+            viewBox="0 0 24 24" 
+            stroke="currentColor"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </button>
+
+        {/* Code View with improved styling */}
+        <div className="flex-1 flex flex-col overflow-hidden bg-gradient-to-b from-gray-900 via-gray-900 to-black">
           {selectedFile ? (
             <>
-              {/* File Tabs */}
-              <div className="flex items-center border-b border-orange-500/30 bg-black overflow-x-auto">
+              {/* File Tabs with improved styling */}
+              <div className="flex items-center border-b-2 border-orange-500/40 bg-gradient-to-r from-black via-gray-900 to-black overflow-x-auto shadow-md">
                 {openTabs.map((tab) => (
                   <div
                     key={tab}
-                    className={`flex items-center gap-2 px-3 py-2 border-r border-orange-500/30 cursor-pointer group ${
-                      selectedFile === tab ? 'bg-gray-900 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                    className={`flex items-center gap-2 px-4 py-2.5 border-r border-orange-500/30 cursor-pointer group transition-all ${
+                      selectedFile === tab 
+                        ? 'bg-gradient-to-b from-gray-800 to-gray-900 text-white border-t-2 border-t-orange-500 shadow-lg' 
+                        : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
                     }`}
                     onClick={() => {
                       const file = findFileByPath(fileTree, tab);
@@ -436,42 +566,234 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
                 ))}
               </div>
 
-              {/* Editor Toolbar */}
-              <div className="flex items-center justify-between px-4 py-2 bg-black border-b border-orange-500/30">
-                <div className="flex items-center gap-2 text-xs text-gray-400">
-                  <span>{selectedFile}</span>
-                  {hasUnsavedChanges && <span className="text-orange-400">• Modified</span>}
+              {/* Editor Toolbar with improved styling */}
+              <div className="flex items-center justify-between px-4 py-2 bg-gradient-to-r from-black via-gray-900 to-black border-b-2 border-orange-500/40 shadow-md">
+                <div className="flex items-center gap-2 text-xs text-gray-300">
+                  <svg className="h-3 w-3 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  <span className="font-medium">{selectedFile}</span>
+                  {hasUnsavedChanges && (
+                    <span className="flex items-center gap-1 text-orange-400 font-semibold">
+                      <span className="w-2 h-2 bg-orange-400 rounded-full animate-pulse"></span>
+                      Modified
+                    </span>
+                  )}
                 </div>
                 <button
                   onClick={handleSaveFile}
                   disabled={!hasUnsavedChanges}
-                  className="px-3 py-1 bg-orange-500 text-black text-xs rounded hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="px-4 py-1.5 bg-gradient-to-r from-orange-500 to-yellow-500 text-black text-xs font-bold rounded-lg hover:from-orange-600 hover:to-yellow-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md hover:shadow-lg"
                 >
-                  Save (Ctrl+S)
+                  💾 Save (Ctrl+S)
                 </button>
               </div>
 
-              {/* Monaco Editor */}
-              <div className="flex-1 overflow-hidden">
-                <Editor
-                  height="100%"
-                  defaultLanguage={getLanguage(selectedFile)}
-                  value={fileContent}
-                  onChange={handleEditorChange}
-                  theme="vs-dark"
-                  options={{
-                    minimap: { enabled: false },
-                    fontSize: 14,
-                    lineNumbers: 'on',
-                    scrollBeyondLastLine: false,
-                    automaticLayout: true,
-                    tabSize: 2,
-                  }}
-                  onMount={(editor) => {
-                    editorRef.current = editor;
-                  }}
-                />
+              {/* Content Area - Monaco Editor or Image Viewer */}
+              <div className="flex-1 overflow-hidden" style={{ height: showTerminal ? `calc(100% - ${terminalHeight}px)` : '100%' }}>
+                {selectedFile && isImageFile(selectedFile) ? (
+                  /* Image Viewer */
+                  <div className="h-full w-full flex items-center justify-center bg-gray-900 p-8 overflow-auto">
+                    <div className="max-w-full max-h-full flex flex-col items-center gap-4">
+                      <img
+                        src={getImageUrl(selectedFile)}
+                        alt={selectedFile.split('/').pop()}
+                        className="max-w-full max-h-full object-contain rounded-lg shadow-2xl border-2 border-orange-500/30"
+                        style={{ maxHeight: 'calc(100vh - 300px)' }}
+                      />
+                      <div className="text-center">
+                        <p className="text-sm text-gray-400">
+                          {selectedFile.split('/').pop()}
+                        </p>
+                        <p className="text-xs text-gray-600 mt-1">
+                          Image preview • Click to open in new tab
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        <a
+                          href={getImageUrl(selectedFile)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm rounded-lg transition-all"
+                        >
+                          Open in New Tab
+                        </a>
+                        <a
+                          href={getImageUrl(selectedFile)}
+                          download={selectedFile.split('/').pop()}
+                          className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded-lg transition-all"
+                        >
+                          Download
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  /* Monaco Editor for code files */
+                  <Editor
+                    height="100%"
+                    defaultLanguage={getLanguage(selectedFile)}
+                    value={fileContent}
+                    onChange={handleEditorChange}
+                    theme="vs-dark"
+                    options={{
+                      minimap: { enabled: false },
+                      fontSize: 14,
+                      lineNumbers: 'on',
+                      scrollBeyondLastLine: false,
+                      automaticLayout: true,
+                      tabSize: 2,
+                      wordWrap: 'on',
+                      formatOnPaste: true,
+                      formatOnType: true,
+                    }}
+                    beforeMount={(monaco) => {
+                      // Completely disable all syntax error markers and validation
+                      monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+                        noSemanticValidation: true,
+                        noSyntaxValidation: true,
+                        noSuggestionDiagnostics: true,
+                        diagnosticCodesToIgnore: [1005, 1006, 1109, 1128, 1160, 1161, 1434, 2304, 2307, 2322, 2339, 2345, 2552, 2554, 2555, 2556, 2571, 2580, 2581, 2582, 2583, 2584, 2585, 2586, 2587, 2588, 2589, 2590, 2591, 2592, 2593, 2594, 2595, 2596, 2597, 2598, 2599, 2600, 2601, 2602, 2603, 2604, 2605, 2606, 2607, 2608, 2609, 2610, 2611, 2612, 2613, 2614, 2615, 2616, 2617, 2618, 2619, 2620, 2621, 2622, 2623, 2624, 2625, 2626, 2627, 2628, 2629, 2630, 2631, 2632, 2633, 2634, 2635, 2636, 2637, 2638, 2639, 2640, 2641, 2642, 2643, 2644, 2645, 2646, 2647, 2648, 2649, 2650, 2651, 2652, 2653, 2654, 2655, 2656, 2657, 2658, 2659, 2660, 2661, 2662, 2663, 2664, 2665, 2666, 2667, 2668, 2669, 2670, 2671, 2672, 2673, 2674, 2675, 2676, 2677, 2678, 2679, 2680, 2681, 2682, 2683, 2684, 2685, 2686, 2687, 2688, 2689, 2690, 2691, 2692, 2693, 2694, 2695, 2696, 2697, 2698, 2699, 2700, 2701, 2702, 2703, 2704, 2705, 2706, 2707, 2708, 2709, 2710, 2711, 2712, 2713, 2714, 2715, 2716, 2717, 2718, 2719, 2720, 2721, 2722, 2723, 2724, 2725, 2726, 2727, 2728, 2729, 2730, 2731, 2732, 2733, 2734, 2735, 2736, 2737, 2738, 2739, 2740, 2741, 2742, 2743, 2744, 2745, 2746, 2747, 2748, 2749, 2750, 2751, 2752, 2753, 2754, 2755, 2756, 2757, 2758, 2759, 2760, 2761, 2762, 2763, 2764, 2765, 2766, 2767, 2768, 2769, 2770, 2771, 2772, 2773, 2774, 2775, 2776, 2777, 2778, 2779, 2780, 2781, 2782, 2783, 2784, 2785, 2786, 2787, 2788, 2789, 2790, 2791, 2792, 2793, 2794, 2795, 2796, 2797, 2798, 2799, 2800],
+                      });
+                      monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+                        noSemanticValidation: true,
+                        noSyntaxValidation: true,
+                        noSuggestionDiagnostics: true,
+                        diagnosticCodesToIgnore: [1005, 1006, 1109, 1128, 1160, 1161, 1434, 2304, 2307, 2322, 2339, 2345, 2552, 2554, 2555, 2556, 2571, 2580, 2581, 2582, 2583, 2584, 2585, 2586, 2587, 2588, 2589, 2590, 2591, 2592, 2593, 2594, 2595, 2596, 2597, 2598, 2599, 2600, 2601, 2602, 2603, 2604, 2605, 2606, 2607, 2608, 2609, 2610, 2611, 2612, 2613, 2614, 2615, 2616, 2617, 2618, 2619, 2620, 2621, 2622, 2623, 2624, 2625, 2626, 2627, 2628, 2629, 2630, 2631, 2632, 2633, 2634, 2635, 2636, 2637, 2638, 2639, 2640, 2641, 2642, 2643, 2644, 2645, 2646, 2647, 2648, 2649, 2650, 2651, 2652, 2653, 2654, 2655, 2656, 2657, 2658, 2659, 2660, 2661, 2662, 2663, 2664, 2665, 2666, 2667, 2668, 2669, 2670, 2671, 2672, 2673, 2674, 2675, 2676, 2677, 2678, 2679, 2680, 2681, 2682, 2683, 2684, 2685, 2686, 2687, 2688, 2689, 2690, 2691, 2692, 2693, 2694, 2695, 2696, 2697, 2698, 2699, 2700, 2701, 2702, 2703, 2704, 2705, 2706, 2707, 2708, 2709, 2710, 2711, 2712, 2713, 2714, 2715, 2716, 2717, 2718, 2719, 2720, 2721, 2722, 2723, 2724, 2725, 2726, 2727, 2728, 2729, 2730, 2731, 2732, 2733, 2734, 2735, 2736, 2737, 2738, 2739, 2740, 2741, 2742, 2743, 2744, 2745, 2746, 2747, 2748, 2749, 2750, 2751, 2752, 2753, 2754, 2755, 2756, 2757, 2758, 2759, 2760, 2761, 2762, 2763, 2764, 2765, 2766, 2767, 2768, 2769, 2770, 2771, 2772, 2773, 2774, 2775, 2776, 2777, 2778, 2779, 2780, 2781, 2782, 2783, 2784, 2785, 2786, 2787, 2788, 2789, 2790, 2791, 2792, 2793, 2794, 2795, 2796, 2797, 2798, 2799, 2800],
+                      });
+                      
+                      // Disable all error markers globally
+                      monaco.editor.setModelMarkers(monaco.editor.getModels()[0], 'owner', []);
+                    }}
+                    onMount={(editor, monaco) => {
+                      editorRef.current = editor;
+                      
+                      // Clear all markers on mount
+                      const model = editor.getModel();
+                      if (model) {
+                        monaco.editor.setModelMarkers(model, 'owner', []);
+                      }
+                      
+                      // Listen for marker changes and clear them
+                      monaco.editor.onDidChangeMarkers(() => {
+                        const model = editor.getModel();
+                        if (model) {
+                          monaco.editor.setModelMarkers(model, 'owner', []);
+                        }
+                      });
+                    }}
+                  />
+                )}
               </div>
+
+              {/* Terminal Panel */}
+              {showTerminal && (
+                <div 
+                  className="border-t-2 border-orange-500/40 bg-black flex flex-col"
+                  style={{ height: `${terminalHeight}px` }}
+                >
+                  {/* Terminal Header */}
+                  <div className="flex items-center justify-between px-4 py-2 bg-gradient-to-r from-black via-gray-900 to-black border-b border-orange-500/30">
+                    <div className="flex items-center gap-3">
+                      <svg className="h-4 w-4 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                      </svg>
+                      <span className="text-sm font-semibold text-white">Terminal</span>
+                      {projectId && (
+                        <span className="text-xs text-gray-400 bg-gray-800 px-2 py-0.5 rounded">
+                          {projectId}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setTerminalLogs([])}
+                        className="p-1 hover:bg-gray-800 rounded text-gray-400 hover:text-white"
+                        title="Clear terminal"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={() => setShowTerminal(false)}
+                        className="p-1 hover:bg-gray-800 rounded text-gray-400 hover:text-white"
+                        title="Hide terminal"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Resize Handle */}
+                  <div
+                    className="h-1 bg-orange-500/20 hover:bg-orange-500/40 cursor-ns-resize transition-colors"
+                    onMouseDown={(e) => {
+                      setIsResizing(true);
+                      const startY = e.clientY;
+                      const startHeight = terminalHeight;
+                      
+                      const handleMouseMove = (e: MouseEvent) => {
+                        const delta = startY - e.clientY;
+                        const newHeight = Math.max(100, Math.min(500, startHeight + delta));
+                        setTerminalHeight(newHeight);
+                      };
+                      
+                      const handleMouseUp = () => {
+                        setIsResizing(false);
+                        document.removeEventListener('mousemove', handleMouseMove);
+                        document.removeEventListener('mouseup', handleMouseUp);
+                      };
+                      
+                      document.addEventListener('mousemove', handleMouseMove);
+                      document.addEventListener('mouseup', handleMouseUp);
+                    }}
+                  />
+
+                  {/* Terminal Content */}
+                  <div 
+                    ref={terminalRef}
+                    className="flex-1 overflow-y-auto p-3 font-mono text-xs text-gray-300 space-y-1"
+                  >
+                    {terminalLogs.length === 0 ? (
+                      <div className="text-gray-500 text-center py-8">
+                        <svg className="h-8 w-8 mx-auto mb-2 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                        </svg>
+                        <p>No logs yet. Project status will appear here.</p>
+                      </div>
+                    ) : (
+                      terminalLogs.map((log, index) => (
+                        <div key={index} className="flex items-start gap-2">
+                          <span className="text-gray-600 flex-shrink-0">
+                            {log.timestamp.toLocaleTimeString()}
+                          </span>
+                          <span className={`flex-shrink-0 ${
+                            log.type === 'error' ? 'text-red-400' :
+                            log.type === 'success' ? 'text-green-400' :
+                            log.type === 'warning' ? 'text-yellow-400' :
+                            'text-blue-400'
+                          }`}>
+                            {log.type === 'error' ? '✗' :
+                             log.type === 'success' ? '✓' :
+                             log.type === 'warning' ? '⚠' : 'ℹ'}
+                          </span>
+                          <span className={`flex-1 ${
+                            log.type === 'error' ? 'text-red-300' :
+                            log.type === 'success' ? 'text-green-300' :
+                            log.type === 'warning' ? 'text-yellow-300' :
+                            'text-gray-300'
+                          }`}>
+                            {log.message}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
             </>
           ) : (
             <div className="flex-1 flex items-center justify-center text-gray-500">
@@ -485,6 +807,19 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
                 <p className="text-xs text-gray-600 mt-1">Choose from the explorer</p>
               </div>
             </div>
+          )}
+
+          {/* Terminal Toggle Button (when hidden) */}
+          {!showTerminal && selectedFile && (
+            <button
+              onClick={() => setShowTerminal(true)}
+              className="absolute bottom-4 right-4 p-2 bg-orange-500 hover:bg-orange-600 rounded-lg shadow-lg transition-all"
+              title="Show terminal"
+            >
+              <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            </button>
           )}
         </div>
       </div>
