@@ -25,25 +25,50 @@ export default function ProjectSelector({ onSelectProject, currentProjectId }: P
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadProjects = async () => {
+  const loadProjects = async (retries = 3) => {
     setLoading(true);
     setError(null);
     
-    try {
-      const response = await fetch('/api/projects');
-      
-      if (!response.ok) {
-        throw new Error('Failed to load projects');
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const response = await fetch('/api/projects', {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.message || `Failed to load projects (${response.status})`);
+        }
+        
+        const data = await response.json();
+        setProjects(data.projects || []);
+        setLoading(false);
+        return; // Success, exit retry loop
+      } catch (err: any) {
+        console.error(`Error loading projects (attempt ${attempt}/${retries}):`, err);
+        
+        // Check if it's a connection error
+        if (err.message?.includes('Failed to fetch') || err.message?.includes('ERR_CONNECTION_REFUSED')) {
+          if (attempt < retries) {
+            // Wait before retrying (exponential backoff)
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            continue;
+          } else {
+            setError('Cannot connect to server. Please make sure the Next.js server is running and try again.');
+          }
+        } else {
+          // Other errors, don't retry
+          setError(err.message || 'Failed to load projects');
+          setLoading(false);
+          return;
+        }
       }
-      
-      const data = await response.json();
-      setProjects(data.projects || []);
-    } catch (err: any) {
-      console.error('Error loading projects:', err);
-      setError(err.message);
-    } finally {
-      setLoading(false);
     }
+    
+    setLoading(false);
   };
 
   useEffect(() => {

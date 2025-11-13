@@ -24,6 +24,13 @@ interface Message {
   timestamp: Date;
 }
 
+// Generate unique message IDs to prevent duplicate keys
+let messageIdCounter = 0;
+const generateMessageId = (): string => {
+  messageIdCounter++;
+  return `${Date.now()}-${messageIdCounter}-${Math.random().toString(36).substring(2, 11)}`;
+};
+
 interface FileNode {
   name: string;
   type: 'file' | 'folder';
@@ -69,7 +76,7 @@ export default function Home() {
     
     // Add user message
     const userMessage: Message = {
-      id: Date.now().toString(),
+      id: generateMessageId(),
       role: 'user',
       content: `✏️ ${promptText}`,
       timestamp: new Date(),
@@ -86,7 +93,7 @@ export default function Home() {
         
         // Add success message
         const successMessage: Message = {
-          id: (Date.now() + 1).toString(),
+          id: generateMessageId(),
           role: 'assistant',
           content: `✅ ${response.message}\n\nFiles modified:\n${response.files_modified.map(f => `• ${f}`).join('\n')}\n\n${response.changes_summary}`,
           timestamp: new Date(),
@@ -103,7 +110,7 @@ export default function Home() {
       
       // Add error message
       const errorMsg: Message = {
-        id: (Date.now() + 2).toString(),
+        id: generateMessageId(),
         role: 'assistant',
         content: `❌ Error: ${errorMessage}`,
         timestamp: new Date(),
@@ -129,7 +136,7 @@ export default function Home() {
     
     // Add user message
     const userMessage: Message = {
-      id: Date.now().toString(),
+      id: generateMessageId(),
       role: 'user',
       content: promptText + (templateId ? ` [Template: ${templateId}]` : ''),
       timestamp: new Date(),
@@ -160,7 +167,7 @@ export default function Home() {
       
       // Add assistant message
       const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
+        id: generateMessageId(),
         role: 'assistant',
         content: `🚀 Starting generation... Project ID: ${response.project_id.substring(0, 8)}`,
         timestamp: new Date(),
@@ -234,14 +241,16 @@ export default function Home() {
             created_at: prev?.created_at || new Date().toISOString(),
           }));
           
-          // Load file tree
+          // Load file tree (with a small delay to allow backend to prepare files)
           if (currentProjectId) {
-            await loadFileTree(currentProjectId);
+            setTimeout(async () => {
+              await loadFileTree(currentProjectId, false);
+            }, 2000); // Wait 2 seconds before loading file tree
           }
           
           // Add preview ready message
           const previewMessage: Message = {
-            id: (Date.now() + 2).toString(),
+            id: generateMessageId(),
             role: 'assistant',
             content: `✅ Preview ready! Your app is now available.\n\nPreview URL: ${validUrl}`,
             timestamp: new Date(),
@@ -274,14 +283,16 @@ export default function Home() {
             };
           });
           
-          // Load file tree
+          // Load file tree (with a small delay to allow backend to prepare files)
           if (currentProjectId) {
-            await loadFileTree(currentProjectId);
+            setTimeout(async () => {
+              await loadFileTree(currentProjectId, false);
+            }, 2000); // Wait 2 seconds before loading file tree
           }
           
           // Add completion message
           const completeMessage: Message = {
-            id: (Date.now() + 3).toString(),
+            id: generateMessageId(),
             role: 'assistant',
             content: `🎉 Generation complete! Your app is ready.\n\n${data.preview_url ? `Preview URL: ${data.preview_url}` : 'Project ID: ' + currentProjectId}`,
             timestamp: new Date(),
@@ -305,7 +316,7 @@ export default function Home() {
           });
           
           const errorMsg: Message = {
-            id: (Date.now() + 4).toString(),
+            id: generateMessageId(),
             role: 'assistant',
             content: `❌ Error: ${errorMessage}`,
             timestamp: new Date(),
@@ -359,7 +370,7 @@ export default function Home() {
       
       // Add error message
       const errorMsg: Message = {
-        id: (Date.now() + 3).toString(),
+        id: generateMessageId(),
         role: 'assistant',
         content: `❌ Error: ${errorMessage}`,
         timestamp: new Date(),
@@ -372,31 +383,122 @@ export default function Home() {
     }
   };
 
-  const loadFileTree = async (projId: string, silent = false) => {
+  const loadFileTree = async (projId: string, silent = false, retries = 3) => {
+    if (!projId) {
+      console.warn('loadFileTree called without projectId');
+      return;
+    }
+
+    // Check if API is available first (only on first attempt)
     try {
-      const response = await fetch(`/api/files/${projId}`);
-      if (response.ok) {
-        const data = await response.json();
-        const newFileTree = data.file_tree || [];
-        
-        // Calculate hash of file tree to detect changes
-        const newHash = JSON.stringify(newFileTree);
-        
-        // Check if files changed
-        if (lastFileTreeHash && newHash !== lastFileTreeHash && !silent) {
-          // Files changed - refresh preview
-          console.log('Files changed, refreshing preview...');
-          setPreviewKey(prev => prev + 1);
-          
-          // Show notification
-          showNotification('info', 'Files updated', 'Preview refreshed automatically');
+      const healthController = new AbortController();
+      const healthTimeout = setTimeout(() => healthController.abort(), 2000); // 2 second timeout
+      
+      const healthCheck = await fetch('/api/health', { 
+        method: 'GET',
+        signal: healthController.signal
+      }).catch(() => null);
+      
+      clearTimeout(healthTimeout);
+      
+      if (!healthCheck || !healthCheck.ok) {
+        if (!silent) {
+          console.warn('API routes not available, skipping file tree load');
         }
-        
-        setFileTree(newFileTree);
-        setLastFileTreeHash(newHash);
+        return; // Silently fail if API isn't available
       }
-    } catch (error) {
-      console.error('Failed to load file tree:', error);
+    } catch (e) {
+      // Health check failed, but continue anyway (might be temporary)
+      if (!silent) {
+        console.warn('Health check failed, but continuing with file tree load');
+      }
+    }
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+        
+        const response = await fetch(`/api/files/${projId}`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (response.ok) {
+          const data = await response.json();
+          const newFileTree = data.file_tree || [];
+          
+          // Calculate hash of file tree to detect changes
+          const newHash = JSON.stringify(newFileTree);
+          
+          // Check if files changed
+          if (lastFileTreeHash && newHash !== lastFileTreeHash && !silent) {
+            // Files changed - refresh preview
+            console.log('Files changed, refreshing preview...');
+            setPreviewKey(prev => prev + 1);
+            
+            // Show notification
+            showNotification('info', 'Files updated', 'Preview refreshed automatically');
+          }
+          
+          setFileTree(newFileTree);
+          setLastFileTreeHash(newHash);
+          return; // Success, exit retry loop
+        } else {
+          // If not OK, try to get error message
+          const errorData = await response.json().catch(() => ({}));
+          
+          // Don't log 404s as errors if silent mode
+          if (response.status !== 404 || !silent) {
+            console.warn(`Failed to load file tree (attempt ${attempt}/${retries}):`, response.status, errorData);
+          }
+          
+          if (attempt < retries && response.status !== 404) {
+            // Wait before retrying (exponential backoff), but don't retry 404s
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            continue;
+          } else {
+            if (!silent && response.status !== 404) {
+              console.error('Failed to load file tree after retries:', errorData);
+            }
+            return; // Exit on 404 or after all retries
+          }
+        }
+      } catch (error: any) {
+        // Check if it's an abort (timeout) or connection error
+        const isConnectionError = error.name === 'AbortError' || 
+                                  error.message?.includes('Failed to fetch') || 
+                                  error.message?.includes('ERR_CONNECTION_REFUSED') ||
+                                  error.message?.includes('network');
+        
+        if (isConnectionError) {
+          if (attempt < retries) {
+            if (!silent) {
+              console.log(`Retrying file tree load in ${1000 * attempt}ms... (attempt ${attempt}/${retries})`);
+            }
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            continue;
+          } else {
+            // Final attempt failed - only log if not silent
+            if (!silent) {
+              console.warn('Failed to load file tree: API routes may not be available. This is normal if the server is still starting.');
+            }
+            // Don't show error notification for connection errors - they're usually temporary
+            return;
+          }
+        } else {
+          // Other errors, don't retry
+          if (!silent) {
+            console.error('Failed to load file tree:', error);
+          }
+          return; // Exit on non-connection errors
+        }
+      }
     }
   };
 
@@ -515,7 +617,7 @@ export default function Home() {
     try {
       // Add message about activation
       const activatingMessage: Message = {
-        id: Date.now().toString(),
+        id: generateMessageId(),
         role: 'assistant',
         content: `Loading project ${selectedProjectId.substring(0, 8)}...\n⏳ Starting Expo server (this may take up to 90 seconds)\n⏳ Creating preview tunnel`,
         timestamp: new Date(),
@@ -561,7 +663,7 @@ export default function Home() {
       
       // Add success message to chat
       const message: Message = {
-        id: Date.now().toString(),
+        id: generateMessageId(),
         role: 'assistant',
         content: `✅ Project loaded: ${selectedProjectId.substring(0, 8)}${projectStatus.preview_url ? `\n🔗 Preview: ${projectStatus.preview_url}` : ''}`,
         timestamp: new Date(),
@@ -574,7 +676,7 @@ export default function Home() {
       
       // Add error message
       const errorMsg: Message = {
-        id: Date.now().toString(),
+        id: generateMessageId(),
         role: 'assistant',
         content: `❌ Failed to load project: ${error.message}`,
         timestamp: new Date(),
@@ -684,7 +786,7 @@ export default function Home() {
       
       // Add success message
       const successMessage: Message = {
-        id: Date.now().toString(),
+        id: generateMessageId(),
         role: 'assistant',
         content: `✅ Template Applied!\n\n${data.message}\n\nFiles updated: ${data.files_updated.length}`,
         timestamp: new Date(),

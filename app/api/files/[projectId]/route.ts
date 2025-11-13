@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || 'https://mobile-generator-backend-1098053868371.us-central1.run.app';
+const API_KEY = process.env.API_KEY || 'dev-key-12345';
 
 export async function GET(
   request: NextRequest,
@@ -13,6 +14,7 @@ export async function GET(
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
+        'X-API-Key': API_KEY,
       },
     });
 
