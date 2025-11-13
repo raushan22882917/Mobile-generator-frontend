@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
+import { apiClient } from '@/lib/api-client';
 import LogsPanel, { LogEntry } from '@/components/LogsPanel';
 import { logger } from '@/lib/logger';
 
@@ -201,32 +202,20 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     }]);
     
     try {
-      const response = await fetch(`/api/files/${projectId}/${selectedFile}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: fileContent }),
-      });
+      await apiClient.updateFile(projectId, selectedFile, fileContent);
       
-      if (response.ok) {
-        setHasUnsavedChanges(false);
-        onFileUpdate?.(selectedFile, fileContent);
-        setTerminalLogs(prev => [...prev, {
-          type: 'success' as const,
-          message: `✓ Saved ${selectedFile}`,
-          timestamp: new Date()
-        }]);
-      } else {
-        setTerminalLogs(prev => [...prev, {
-          type: 'error' as const,
-          message: `Failed to save ${selectedFile}`,
-          timestamp: new Date()
-        }]);
-      }
-    } catch (error) {
+      setHasUnsavedChanges(false);
+      onFileUpdate?.(selectedFile, fileContent);
+      setTerminalLogs(prev => [...prev, {
+        type: 'success' as const,
+        message: `✓ Saved ${selectedFile}`,
+        timestamp: new Date()
+      }]);
+    } catch (error: any) {
       console.error('Failed to save file:', error);
       setTerminalLogs(prev => [...prev, {
         type: 'error' as const,
-        message: `Error saving ${selectedFile}: ${error}`,
+        message: `Error saving ${selectedFile}: ${error.message || error}`,
         timestamp: new Date()
       }]);
     }
@@ -236,24 +225,23 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     if (!projectId || !newFileName.trim()) return;
     
     try {
-      const response = await fetch(`/api/files/${projectId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          path: newFileName,
-          type: newFileType,
-          content: newFileType === 'file' ? '' : undefined
-        }),
+      await apiClient.createFile(projectId, {
+        path: newFileName,
+        type: newFileType,
+        content: newFileType === 'file' ? '' : undefined
       });
       
-      if (response.ok) {
-        setShowNewFileDialog(false);
-        setNewFileName('');
-        // Trigger refresh
-        onFileChange?.();
-      }
-    } catch (error) {
+      setShowNewFileDialog(false);
+      setNewFileName('');
+      // Trigger refresh
+      onFileChange?.();
+    } catch (error: any) {
       console.error('Failed to create file:', error);
+      setTerminalLogs(prev => [...prev, {
+        type: 'error' as const,
+        message: `Failed to create ${newFileName}: ${error.message || error}`,
+        timestamp: new Date()
+      }]);
     }
   };
 
@@ -261,21 +249,28 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     if (!projectId || !confirm(`Delete ${path}?`)) return;
     
     try {
-      const response = await fetch(`/api/files/${projectId}/${path}`, {
-        method: 'DELETE',
-      });
+      await apiClient.deleteFile(projectId, path);
       
-      if (response.ok) {
-        // Remove from tabs
-        setOpenTabs(openTabs.filter(t => t !== path));
-        if (selectedFile === path) {
-          setSelectedFile(null);
-        }
-        // Trigger refresh
-        onFileChange?.();
+      // Remove from tabs
+      setOpenTabs(openTabs.filter(t => t !== path));
+      if (selectedFile === path) {
+        setSelectedFile(null);
       }
-    } catch (error) {
+      // Trigger refresh
+      onFileChange?.();
+      
+      setTerminalLogs(prev => [...prev, {
+        type: 'success' as const,
+        message: `✓ Deleted ${path}`,
+        timestamp: new Date()
+      }]);
+    } catch (error: any) {
       console.error('Failed to delete file:', error);
+      setTerminalLogs(prev => [...prev, {
+        type: 'error' as const,
+        message: `Failed to delete ${path}: ${error.message || error}`,
+        timestamp: new Date()
+      }]);
     }
   };
 
@@ -283,20 +278,25 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     if (!projectId || !renameTarget || !renameValue.trim()) return;
     
     try {
-      const response = await fetch(`/api/files/${projectId}/${renameTarget}/rename`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ new_name: renameValue }),
-      });
+      await apiClient.renameFile(projectId, renameTarget, renameValue.trim());
       
-      if (response.ok) {
-        setRenameTarget(null);
-        setRenameValue('');
-        // Trigger refresh
-        onFileChange?.();
-      }
-    } catch (error) {
+      setRenameTarget(null);
+      setRenameValue('');
+      // Trigger refresh
+      onFileChange?.();
+      
+      setTerminalLogs(prev => [...prev, {
+        type: 'success' as const,
+        message: `✓ Renamed ${renameTarget} to ${renameValue.trim()}`,
+        timestamp: new Date()
+      }]);
+    } catch (error: any) {
       console.error('Failed to rename file:', error);
+      setTerminalLogs(prev => [...prev, {
+        type: 'error' as const,
+        message: `Failed to rename ${renameTarget}: ${error.message || error}`,
+        timestamp: new Date()
+      }]);
     }
   };
 

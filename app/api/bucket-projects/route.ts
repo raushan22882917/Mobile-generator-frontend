@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || 'https://mobile-generator-backend-1098053868371.us-central1.run.app';
 
 export async function GET(request: NextRequest) {
-  console.log('Templates endpoint called');
+  console.log('Bucket-projects endpoint called');
   console.log('BACKEND_URL:', BACKEND_URL);
   
   try {
@@ -13,7 +13,7 @@ export async function GET(request: NextRequest) {
     
     let response;
     try {
-      response = await fetch(`${BACKEND_URL}/templates`, {
+      response = await fetch(`${BACKEND_URL}/bucket-projects`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
@@ -37,16 +37,36 @@ export async function GET(request: NextRequest) {
         );
       }
       
-      // Handle network errors
-      if (fetchError.message?.includes('fetch failed') || fetchError.code === 'ECONNREFUSED') {
+      // Handle network errors and connection failures
+      if (fetchError.message?.includes('fetch failed') || 
+          fetchError.code === 'ECONNREFUSED' ||
+          fetchError.message?.includes('ECONNREFUSED') ||
+          fetchError.message?.includes('Failed to fetch')) {
         console.error('Network error connecting to backend:', fetchError);
         return NextResponse.json(
           {
             error: 'NETWORK_ERROR',
             message: 'Failed to connect to backend server',
-            suggestion: 'The backend server may be unreachable. Please check if the backend is running.',
+            suggestion: `The backend server at ${BACKEND_URL} may be unreachable. Please check if the backend is running and the URL is correct.`,
+            backend_url: BACKEND_URL,
           },
-          { status: 503 }
+          { status: 502 }
+        );
+      }
+      
+      // Handle DNS errors
+      if (fetchError.message?.includes('getaddrinfo') || 
+          fetchError.message?.includes('ENOTFOUND') ||
+          fetchError.code === 'ENOTFOUND') {
+        console.error('DNS error - backend host not found:', fetchError);
+        return NextResponse.json(
+          {
+            error: 'DNS_ERROR',
+            message: 'Backend hostname could not be resolved',
+            suggestion: `The backend URL ${BACKEND_URL} cannot be resolved. Please check if the URL is correct.`,
+            backend_url: BACKEND_URL,
+          },
+          { status: 502 }
         );
       }
       
@@ -75,6 +95,23 @@ export async function GET(request: NextRequest) {
 
     // Parse successful response
     const data = await response.json();
+    
+    // Log project count for debugging
+    const projectCount = data.projects?.length || data.items?.length || 0;
+    console.log(`Bucket projects response: ${projectCount} projects found`);
+    console.log('Response structure:', Object.keys(data));
+    
+    // Log each project's structure for debugging
+    if (data.projects && data.projects.length > 0) {
+      console.log('Sample project structure:', JSON.stringify(data.projects[0], null, 2));
+      console.log('All project IDs:', data.projects.map((p: any) => ({
+        project_id: p.project_id,
+        id: p.id,
+        file_name: p.file_name,
+        gcs_path: p.gcs_path
+      })));
+    }
+    
     return NextResponse.json(data, { status: response.status });
   } catch (error: any) {
     console.error('Proxy error:', error);

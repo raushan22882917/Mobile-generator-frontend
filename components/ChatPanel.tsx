@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import { apiClient } from '@/lib/api-client';
 
 interface Message {
   id: string;
@@ -96,25 +97,21 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     setIsAnalyzing(true);
     
     try {
-      const response = await fetch('/api/analyze-prompt', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
-          prompt: input.trim()
-        }),
-      });
-
-      if (!response.ok) {
-        // Endpoint doesn't exist or failed - silently continue without suggestions
-        return false;
-      }
-
-      const data = await response.json();
+      const data = await apiClient.analyzePrompt(input.trim());
       
-      if (data.success) {
-        setSuggestions(data.suggestions);
+      // Transform API response to match component's expected format
+      if (data.screens && data.screens.length > 0) {
+        setSuggestions({
+          screens: data.screens.map((s: any) => ({
+            name: s.name || s.file_name || 'Screen',
+            file_name: s.file_name || `${s.name?.toLowerCase().replace(/\s+/g, '-')}.tsx`,
+            location: s.location || 'screens',
+            description: s.description || ''
+          })),
+          images: data.images || [],
+          total_screens: data.total_screens || data.screens.length,
+          total_images: data.total_images || (data.images?.length || 0)
+        });
         setShowSuggestions(true);
         return true;
       }
@@ -123,6 +120,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     } catch (error: any) {
       // Silently fail - don't log errors for missing endpoint
       // Continue with generation even if analysis fails
+      console.debug('Analyze prompt failed (non-critical):', error);
       return false;
     } finally {
       setIsAnalyzing(false);
@@ -150,7 +148,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
         onEdit(input.trim());
       }
     } else {
-      // Create mode - analyze prompt first to show suggestions
+      // Create mode - analyze prompt first to show suggestions (optional)
       if (mode === 'create' && !showSuggestions) {
         const hasSuggestions = await analyzePrompt();
         // Only return early if suggestions were successfully shown
@@ -160,12 +158,8 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
         // If analysis failed, continue with normal flow
       }
       
-      // Show template selector if not already selected
-      if (!selectedTemplate && mode === 'create') {
-        setShowTemplateSelector(true);
-        return;
-      }
-      
+      // Template is optional - allow creation without template selection
+      // Users can apply templates later if they want
       onSubmit(input.trim(), selectedTemplate);
       setShowSuggestions(false);
       setSuggestions(null);
@@ -192,15 +186,16 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
       });
 
       if (!response.ok) {
-        throw new Error('Failed to apply template');
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || errorData.error || 'Failed to apply template');
       }
 
       const data = await response.json();
-      alert(`✅ Template Applied!\n\n${data.message}\n\nFiles updated: ${data.files_updated.length}`);
+      alert(`✅ Template Applied!\n\n${data.message || 'Template applied successfully'}\n\nFiles updated: ${data.files_updated?.length || 0}`);
       
     } catch (error: any) {
       console.error('Template application error:', error);
-      alert('Failed to apply template: ' + error.message);
+      alert('Failed to apply template: ' + (error.message || error));
     }
   };
 
@@ -213,36 +208,35 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     setIsGeneratingImage(true); // Reuse loading state
     
     try {
-      // Use the chat/edit endpoint which is more reliable
-      const response = await fetch('/api/chat/edit', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
+      // Try generate-screen endpoint first, fallback to chat/edit
+      try {
+        const data = await apiClient.generateScreen({
           prompt: input.trim(),
           project_id: projectId
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(errorData.error || 'Failed to generate files');
+        });
+        
+        if (data.success !== false) {
+          alert(`✅ Screen generated successfully!\n\n${data.message || 'Files created'}`);
+          setInput('');
+          return;
+        }
+      } catch (screenError) {
+        // Fallback to chat/edit if generate-screen fails
+        console.debug('generate-screen failed, trying chat/edit:', screenError);
       }
-
-      const data = await response.json();
+      
+      // Fallback to chat/edit endpoint
+      const data = await apiClient.chatEdit(projectId, input.trim());
       
       if (data.success) {
-        // Add message to chat
-        console.log('Files generated:', data);
         alert(`✅ ${data.message}\n\nFiles modified: ${data.files_modified?.length || 0}\n\n${data.changes_summary || 'Files created successfully'}`);
+        setInput('');
       } else {
         throw new Error(data.message || 'Failed to generate files');
       }
-      
     } catch (error: any) {
-      console.error('File generation error:', error);
-      alert('Failed to generate files: ' + error.message);
+      console.error('Screen generation error:', error);
+      alert('Failed to generate files: ' + (error.message || error));
     } finally {
       setIsGeneratingImage(false);
     }
@@ -257,53 +251,35 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     setIsGeneratingImage(true);
     
     try {
-      const response = await fetch('/api/generate-image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          prompt: input.trim(),
-          project_id: projectId
-        }),
+      const data = await apiClient.generateImage({
+        prompt: input.trim(),
+        project_id: projectId
       });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(errorData.error || 'Failed to generate image');
-      }
-
-      const data = await response.json();
       
       // Check if it's a placeholder
       if (data.is_placeholder) {
-        alert(`⚠️ Image Generation Not Configured\n\n${data.message}\n\nSee GEMINI_SETUP.md for setup instructions.`);
+        alert(`⚠️ Image Generation Not Configured\n\n${data.message || 'Image generation is not configured'}\n\nSee GEMINI_SETUP.md for setup instructions.`);
         return;
       }
       
       // Add to generated images list
-      setGeneratedImages(prev => [...prev, {
-        url: data.image_url,
-        prompt: input.trim(),
-        filename: data.filename
-      }]);
+      if (data.image_url && data.filename) {
+        setGeneratedImages(prev => [...prev, {
+          url: data.image_url,
+          prompt: input.trim(),
+          filename: data.filename
+        }]);
 
-      // Add message to chat
-      const imageMessage: Message = {
-        id: Date.now().toString(),
-        role: 'assistant',
-        content: `🎨 Image generated: ${data.filename}\nSaved to: ${data.path}`,
-        timestamp: new Date(),
-      };
-      
-      // This would need to be passed up to parent component
-      // For now, we'll just show in console
-      console.log('Image generated:', data);
-      
-      // Show success notification
-      alert(`✅ Image Generated!\n\nFilename: ${data.filename}\nPath: ${data.path}`);
+        // Show success notification
+        alert(`✅ Image Generated!\n\nFilename: ${data.filename}\nPath: ${data.path || 'Saved to project'}`);
+        setInput('');
+      } else {
+        throw new Error('Invalid response from image generation');
+      }
       
     } catch (error: any) {
       console.error('Image generation error:', error);
-      alert('Failed to generate image: ' + error.message);
+      alert('Failed to generate image: ' + (error.message || error));
     } finally {
       setIsGeneratingImage(false);
     }

@@ -55,21 +55,42 @@ export async function POST(request: NextRequest) {
             error: 'TIMEOUT_ERROR',
             message: 'Request to backend timed out after 30 seconds',
             suggestion: 'The backend server may be overloaded or unreachable. Please try again in a few moments.',
+            backend_url: BACKEND_URL,
           },
           { status: 504 }
         );
       }
       
-      // Handle network errors
-      if (fetchError.message?.includes('fetch failed') || fetchError.code === 'ECONNREFUSED') {
+      // Handle network errors and connection failures
+      if (fetchError.message?.includes('fetch failed') || 
+          fetchError.code === 'ECONNREFUSED' ||
+          fetchError.message?.includes('ECONNREFUSED') ||
+          fetchError.message?.includes('Failed to fetch')) {
         console.error('Network error connecting to backend:', fetchError);
         return NextResponse.json(
           {
             error: 'NETWORK_ERROR',
             message: 'Failed to connect to backend server',
-            suggestion: 'The backend server may be unreachable. Please check if the backend is running and accessible.',
+            suggestion: `The backend server at ${BACKEND_URL} may be unreachable. Please check if the backend is running and the URL is correct.`,
+            backend_url: BACKEND_URL,
           },
-          { status: 503 }
+          { status: 502 }
+        );
+      }
+      
+      // Handle DNS errors
+      if (fetchError.message?.includes('getaddrinfo') || 
+          fetchError.message?.includes('ENOTFOUND') ||
+          fetchError.code === 'ENOTFOUND') {
+        console.error('DNS error - backend host not found:', fetchError);
+        return NextResponse.json(
+          {
+            error: 'DNS_ERROR',
+            message: 'Backend hostname could not be resolved',
+            suggestion: `The backend URL ${BACKEND_URL} cannot be resolved. Please check if the URL is correct.`,
+            backend_url: BACKEND_URL,
+          },
+          { status: 502 }
         );
       }
       
@@ -81,6 +102,20 @@ export async function POST(request: NextRequest) {
     
     // Check if response is ok
     if (!response.ok) {
+      // Handle 502 Bad Gateway
+      if (response.status === 502) {
+        console.error('Backend returned 502 Bad Gateway - backend may be down or unreachable');
+        return NextResponse.json(
+          {
+            error: 'BAD_GATEWAY',
+            message: 'Backend server is unreachable or returned an invalid response',
+            suggestion: 'The backend server may be temporarily down or experiencing issues. Please try again in a few moments. If the problem persists, check if the backend URL is correct.',
+            backend_url: BACKEND_URL,
+          },
+          { status: 502 }
+        );
+      }
+      
       // Handle 503 Service Unavailable specifically
       if (response.status === 503) {
         let errorData;

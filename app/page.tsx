@@ -53,6 +53,9 @@ export default function Home() {
   });
   const [showTemplateModal, setShowTemplateModal] = useState(false);
   const [templates, setTemplates] = useState<any[]>([]);
+  const [healthStatus, setHealthStatus] = useState<'healthy' | 'unhealthy' | 'checking' | null>(null);
+  const [metrics, setMetrics] = useState<any>(null);
+  const [showMetrics, setShowMetrics] = useState(false);
 
   // Resizable panel widths (in percentages) - improved layout
   const [leftWidth, setLeftWidth] = useState(24); // Chat panel
@@ -149,10 +152,11 @@ export default function Home() {
       logger.info('Starting app generation (fast mode)', { prompt: promptText, templateId });
       
       // Use fast-generate endpoint
+      // Let backend handle user_id - no local storage used
       const response = await apiClient.fastGenerate({ 
         prompt: promptText,
         template_id: templateId || undefined,
-        user_id: 'user123', // You can make this dynamic based on auth
+        // user_id will be handled by backend
       });
       
       if (response.status === 'error') {
@@ -349,10 +353,13 @@ export default function Home() {
       let userMessage = errorMessage;
       let suggestion = error.suggestion;
       
-      if (error.statusCode === 503 || errorMessage.includes('Service Unavailable') || errorMessage.includes('SERVICE_UNAVAILABLE')) {
+      if (error.statusCode === 502 || errorMessage.includes('Bad Gateway') || errorMessage.includes('BAD_GATEWAY') || errorMessage.includes('NETWORK_ERROR') || errorMessage.includes('DNS_ERROR')) {
+        userMessage = 'Cannot connect to backend server';
+        suggestion = suggestion || 'The backend server may be down or unreachable. Please check your network connection and try again.';
+      } else if (error.statusCode === 503 || errorMessage.includes('Service Unavailable') || errorMessage.includes('SERVICE_UNAVAILABLE')) {
         userMessage = 'Backend service is currently unavailable';
         suggestion = suggestion || 'The backend server may be temporarily overloaded or under maintenance. Please try again in a few moments.';
-      } else if (error.statusCode === 504 || errorMessage.includes('timeout')) {
+      } else if (error.statusCode === 504 || errorMessage.includes('timeout') || errorMessage.includes('TIMEOUT')) {
         userMessage = 'Request timed out';
         suggestion = suggestion || 'The operation took too long. The backend may be overloaded. Please try again.';
       }
@@ -368,16 +375,20 @@ export default function Home() {
         });
       }
       
-      // Add error message
+      // Add error message with helpful details
+      const errorContent = error.statusCode === 502 || errorMessage.includes('Bad Gateway') || errorMessage.includes('NETWORK_ERROR') || errorMessage.includes('DNS_ERROR')
+        ? `❌ Cannot connect to backend server\n\n${userMessage}\n\n💡 ${suggestion || 'Please check if the backend server is running and accessible.'}`
+        : `❌ Error: ${userMessage}${suggestion ? `\n\n💡 ${suggestion}` : ''}`;
+      
       const errorMsg: Message = {
         id: generateMessageId(),
         role: 'assistant',
-        content: `❌ Error: ${errorMessage}`,
+        content: errorContent,
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, errorMsg]);
       
-      showNotification('error', errorMessage, 'Please try again');
+      showNotification('error', userMessage, suggestion || 'Please try again');
       setIsGenerating(false);
       setGenerationProgress(null);
     }
@@ -592,6 +603,75 @@ export default function Home() {
     };
   }, []);
 
+  // Poll for preview URL if project is ready but URL is missing
+  useEffect(() => {
+    if (projectId && status?.status === 'ready' && !previewUrl && !isGenerating) {
+      console.log('Project is ready but preview URL is missing, polling for preview URL...');
+      
+      let pollAttempts = 0;
+      const maxAttempts = 10; // Poll for up to 50 seconds (10 * 5s)
+      const pollInterval = 5000; // 5 seconds
+      let timeoutId: NodeJS.Timeout | null = null;
+      
+      const pollForPreviewUrl = async () => {
+        if (pollAttempts >= maxAttempts) {
+          console.log('Stopped polling for preview URL after max attempts. Project is ready but preview URL is not available.');
+          showNotification('warning', 'Preview URL not available', 'The project is ready but the preview URL is not available. The server may still be starting up.');
+          return;
+        }
+        
+        try {
+          const projectStatus = await apiClient.getStatus(projectId);
+          console.log('Polled project status:', {
+            status: projectStatus.status,
+            hasPreviewUrl: !!projectStatus.preview_url,
+            previewUrl: projectStatus.preview_url,
+            attempt: pollAttempts + 1,
+          });
+          
+          if (projectStatus.preview_url) {
+            console.log('Preview URL found via polling:', projectStatus.preview_url);
+            setPreviewUrl(projectStatus.preview_url);
+            setStatus(prev => prev ? {
+              ...prev,
+              preview_url: projectStatus.preview_url,
+            } : projectStatus);
+            return; // Stop polling
+          }
+          
+          // If status changed from 'ready' to something else, stop polling
+          if (projectStatus.status !== 'ready') {
+            console.log('Project status changed from ready to:', projectStatus.status);
+            setStatus(projectStatus);
+            return; // Stop polling, status changed
+          }
+          
+          pollAttempts++;
+          if (pollAttempts < maxAttempts) {
+            timeoutId = setTimeout(pollForPreviewUrl, pollInterval);
+          } else {
+            console.log('Max polling attempts reached. Preview URL still not available.');
+          }
+        } catch (error) {
+          console.error('Error polling for preview URL:', error);
+          pollAttempts++;
+          if (pollAttempts < maxAttempts) {
+            timeoutId = setTimeout(pollForPreviewUrl, pollInterval);
+          }
+        }
+      };
+      
+      // Start polling after a short delay
+      timeoutId = setTimeout(pollForPreviewUrl, pollInterval);
+      
+      return () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+      };
+    }
+  }, [projectId, status?.status, previewUrl, isGenerating]);
+
   // Handle manual refresh from preview frame
   useEffect(() => {
     const handleForceRefresh = () => {
@@ -610,11 +690,82 @@ export default function Home() {
     console.log('File selected:', path);
   };
 
-  const handleSelectProject = async (selectedProjectId: string) => {
+  const handleSelectProject = async (selectedProjectId: string, projectData?: any) => {
     setProjectId(selectedProjectId);
     setIsGenerating(true);
     
     try {
+      // Check if project is already active
+      const isActive = projectData?.is_active === true;
+      const existingPreviewUrl = projectData?.preview_url || projectData?.preview_urls?.[0];
+      
+      if (isActive) {
+        // Project is already active, get status and show preview immediately
+        console.log('Project is already active, fetching status...', {
+          projectId: selectedProjectId,
+          existingPreviewUrl,
+          isActive,
+        });
+        
+        const loadingMessage: Message = {
+          id: generateMessageId(),
+          role: 'assistant',
+          content: `Loading active project ${selectedProjectId.substring(0, 8)}...`,
+          timestamp: new Date(),
+        };
+        setMessages(prev => [...prev, loadingMessage]);
+        
+        showNotification('info', 'Loading project', 'Fetching project status...');
+        
+        // Get current project status (this should have the ngrok URL)
+        const projectStatus = await apiClient.getStatus(selectedProjectId);
+        console.log('Active project status:', projectStatus);
+        
+        // Use preview URL from status (ngrok URL) or fallback to existing one
+        const previewUrl = projectStatus.preview_url || existingPreviewUrl;
+        
+        if (!previewUrl) {
+          console.warn('Active project but no preview URL found. Status:', projectStatus);
+        }
+        
+        setStatus({
+          id: projectStatus.id || selectedProjectId,
+          status: projectStatus.status || 'ready',
+          preview_url: previewUrl,
+          error: projectStatus.error,
+          created_at: projectStatus.created_at || new Date().toISOString(),
+        });
+        
+        if (previewUrl) {
+          console.log('Setting preview URL (ngrok) for active project:', previewUrl);
+          setPreviewUrl(previewUrl);
+        } else {
+          console.warn('No preview URL available for active project, will show "Preview URL Not Available" message');
+        }
+        
+        // Load file tree
+        await loadFileTree(selectedProjectId);
+        
+        // Add success message to chat
+        const message: Message = {
+          id: generateMessageId(),
+          role: 'assistant',
+          content: `✅ Active project loaded: ${selectedProjectId.substring(0, 8)}${previewUrl ? `\n🔗 Preview: ${previewUrl}` : '\n⚠️ Preview URL not available yet'}`,
+          timestamp: new Date(),
+        };
+        setMessages(prev => [...prev, message]);
+        
+        if (previewUrl) {
+          showNotification('success', 'Project loaded!', 'Preview is now available');
+        } else {
+          showNotification('warning', 'Project loaded', 'Preview URL not available yet');
+        }
+        return; // Exit early, no need to activate
+      }
+      
+      // Project is not active, need to activate it
+      console.log('Project is inactive, activating...', selectedProjectId);
+      
       // Add message about activation
       const activatingMessage: Message = {
         id: generateMessageId(),
@@ -626,10 +777,37 @@ export default function Home() {
       
       showNotification('info', 'Loading project', 'Starting Expo server... Please wait');
       
-      // Directly activate the project (this will start server and create tunnel)
+      // Activate the project (this will start server and create tunnel)
       // This can take up to 90 seconds for server start + 30 seconds for tunnel
+      let activationResult: any = null;
       try {
-        await apiClient.activateProject(selectedProjectId);
+        activationResult = await apiClient.activateProject(selectedProjectId);
+        console.log('Activation result:', activationResult);
+        
+        // If activation returned a preview URL immediately, use it
+        if (activationResult.preview_url) {
+          console.log('Preview URL from activation:', activationResult.preview_url);
+          setPreviewUrl(activationResult.preview_url);
+          setStatus({
+            id: selectedProjectId,
+            status: 'ready',
+            preview_url: activationResult.preview_url,
+            error: null,
+            created_at: new Date().toISOString(),
+          });
+          
+          // If we got the preview URL, we're done - no need to poll
+          await loadFileTree(selectedProjectId);
+          const message: Message = {
+            id: generateMessageId(),
+            role: 'assistant',
+            content: `✅ Project activated: ${selectedProjectId.substring(0, 8)}\n🔗 Preview: ${activationResult.preview_url}`,
+            timestamp: new Date(),
+          };
+          setMessages(prev => [...prev, message]);
+          showNotification('success', 'Project ready!', 'Your project is now running');
+          return; // Exit early, we have everything we need
+        }
       } catch (error: any) {
         // If activation fails, show specific error
         if (error.message.includes('timed out') || error.message.includes('timeout')) {
@@ -638,24 +816,48 @@ export default function Home() {
         throw error;
       }
       
-      // Poll for status until ready
-      const projectStatus = await apiClient.pollStatus(selectedProjectId, {
-        onStatusUpdate: (status) => {
-          setStatus(status);
-          
-          // Update message based on status
-          if (status.status === 'starting_server') {
-            showNotification('info', 'Starting server', 'Expo server is starting...');
-          } else if (status.status === 'creating_tunnel') {
-            showNotification('info', 'Creating tunnel', 'Setting up preview URL...');
-          }
-        },
-      });
+      // Check current status before polling
+      let projectStatus = await apiClient.getStatus(selectedProjectId);
+      console.log('Status after activation:', projectStatus);
       
-      setStatus(projectStatus);
-      
-      if (projectStatus.preview_url) {
-        setPreviewUrl(projectStatus.preview_url);
+      // If already ready, use it directly
+      if (projectStatus.status === 'ready') {
+        console.log('Project is already ready after activation');
+        setStatus(projectStatus);
+        if (projectStatus.preview_url) {
+          console.log('Preview URL from status check:', projectStatus.preview_url);
+          setPreviewUrl(projectStatus.preview_url);
+        }
+      } else {
+        // Only poll if project is in a transitional state
+        console.log('Project is in transitional state, polling until ready...', projectStatus.status);
+        projectStatus = await apiClient.pollStatus(selectedProjectId, {
+          intervalMs: 3000, // Poll every 3 seconds
+          maxAttempts: 40, // Max 2 minutes (40 * 3s = 120s)
+          onStatusUpdate: (status) => {
+            setStatus(status);
+            
+            // Update preview URL if available
+            if (status.preview_url) {
+              console.log('Preview URL from status update:', status.preview_url);
+              setPreviewUrl(status.preview_url);
+            }
+            
+            // Update message based on status
+            if (status.status === 'starting_server') {
+              showNotification('info', 'Starting server', 'Expo server is starting...');
+            } else if (status.status === 'creating_tunnel') {
+              showNotification('info', 'Creating tunnel', 'Setting up preview URL...');
+            }
+          },
+        });
+        
+        setStatus(projectStatus);
+        
+        if (projectStatus.preview_url) {
+          console.log('Final preview URL:', projectStatus.preview_url);
+          setPreviewUrl(projectStatus.preview_url);
+        }
       }
       
       // Load file tree
@@ -665,25 +867,41 @@ export default function Home() {
       const message: Message = {
         id: generateMessageId(),
         role: 'assistant',
-        content: `✅ Project loaded: ${selectedProjectId.substring(0, 8)}${projectStatus.preview_url ? `\n🔗 Preview: ${projectStatus.preview_url}` : ''}`,
+        content: `✅ Project loaded: ${selectedProjectId.substring(0, 8)}${projectStatus.preview_url ? `\n🔗 Preview: ${projectStatus.preview_url}` : '\n⚠️ Preview URL not available yet'}`,
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, message]);
       
-      showNotification('success', 'Project ready!', 'Your project is now running');
+      if (projectStatus.preview_url) {
+        showNotification('success', 'Project ready!', 'Your project is now running');
+      } else {
+        showNotification('warning', 'Project loaded', 'Preview URL not available yet. It may still be generating.');
+      }
     } catch (error: any) {
       console.error('Error loading project:', error);
+      
+      // Provide better error messages
+      let errorMessage = error.message || 'Failed to load project';
+      let suggestion = '';
+      
+      if (errorMessage.includes('Status polling timed out')) {
+        errorMessage = 'Project activation is taking longer than expected';
+        suggestion = 'The project may still be starting up. Try waiting a moment and clicking "Check Again" in the preview panel.';
+      } else if (errorMessage.includes('timed out') || errorMessage.includes('timeout')) {
+        errorMessage = 'Request timed out';
+        suggestion = 'The server may be overloaded. Please try again in a moment.';
+      }
       
       // Add error message
       const errorMsg: Message = {
         id: generateMessageId(),
         role: 'assistant',
-        content: `❌ Failed to load project: ${error.message}`,
+        content: `❌ Failed to load project: ${errorMessage}${suggestion ? `\n💡 ${suggestion}` : ''}`,
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, errorMsg]);
       
-      showNotification('error', 'Failed to load project', error.message);
+      showNotification('error', 'Failed to load project', suggestion || errorMessage);
     } finally {
       setIsGenerating(false);
     }
@@ -729,7 +947,42 @@ export default function Home() {
   // Load templates on mount
   useEffect(() => {
     loadTemplates();
+    checkHealth();
+    // Check health every 30 seconds
+    const healthInterval = setInterval(checkHealth, 30000);
+    return () => clearInterval(healthInterval);
   }, []);
+
+  // Load metrics periodically
+  useEffect(() => {
+    if (showMetrics) {
+      loadMetrics();
+      const metricsInterval = setInterval(loadMetrics, 10000);
+      return () => clearInterval(metricsInterval);
+    }
+  }, [showMetrics]);
+
+  const checkHealth = async () => {
+    try {
+      setHealthStatus('checking');
+      const health = await apiClient.getHealth();
+      // Accept both 'healthy' and 'ok' as healthy status
+      const isHealthy = health.status === 'healthy' || health.status === 'ok';
+      setHealthStatus(isHealthy ? 'healthy' : 'unhealthy');
+    } catch (error) {
+      console.error('Health check failed:', error);
+      setHealthStatus('unhealthy');
+    }
+  };
+
+  const loadMetrics = async () => {
+    try {
+      const metricsData = await apiClient.getMetrics();
+      setMetrics(metricsData);
+    } catch (error) {
+      console.error('Failed to load metrics:', error);
+    }
+  };
 
   const loadTemplates = async () => {
     try {
@@ -764,7 +1017,6 @@ export default function Home() {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'X-API-Key': 'dev-key-12345'
         },
         body: JSON.stringify({ 
           project_id: projectId,
@@ -825,6 +1077,36 @@ export default function Home() {
             />
           </div>
           <div className="flex items-center gap-3">
+            {/* Health Status Indicator */}
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-black/50">
+              <div className={`w-2 h-2 rounded-full ${
+                healthStatus === 'healthy' ? 'bg-green-400 animate-pulse' :
+                healthStatus === 'unhealthy' ? 'bg-red-400' :
+                healthStatus === 'checking' ? 'bg-yellow-400 animate-pulse' :
+                'bg-gray-400'
+              }`} />
+              <span className="text-xs text-white/80">
+                {healthStatus === 'healthy' ? 'Online' :
+                 healthStatus === 'unhealthy' ? 'Offline' :
+                 healthStatus === 'checking' ? 'Checking...' :
+                 'Unknown'}
+              </span>
+            </div>
+            
+            {/* Metrics Button */}
+            <button
+              onClick={() => {
+                setShowMetrics(!showMetrics);
+                if (!showMetrics) loadMetrics();
+              }}
+              className="flex items-center space-x-2 bg-black hover:bg-gray-900 text-orange-400 px-4 py-2 rounded-lg text-sm font-medium transition-all shadow-md hover:shadow-lg"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              <span>Metrics</span>
+            </button>
+            
             {projectId && (
               <>
                 <button
@@ -948,9 +1230,81 @@ export default function Home() {
             url={previewUrl}
             status={currentStatus}
             error={status?.error || undefined}
-            onRetry={() => {
+            onRetry={async () => {
               if (projectId) {
-                handleSelectProject(projectId);
+                console.log('Retrying to get preview URL for project:', projectId);
+                try {
+                  // Check project status to get preview URL
+                  const projectStatus = await apiClient.getStatus(projectId);
+                  console.log('Project status on retry:', {
+                    status: projectStatus.status,
+                    hasPreviewUrl: !!projectStatus.preview_url,
+                    previewUrl: projectStatus.preview_url,
+                  });
+                  
+                  if (projectStatus.preview_url) {
+                    console.log('Preview URL found on retry:', projectStatus.preview_url);
+                    setPreviewUrl(projectStatus.preview_url);
+                    setStatus(prev => prev ? {
+                      ...prev,
+                      preview_url: projectStatus.preview_url,
+                    } : projectStatus);
+                    return; // Success, exit early
+                  }
+                  
+                  // Only activate if project is actually inactive or in error state
+                  // Don't activate if it's already 'ready' - just means preview URL isn't available yet
+                  if (projectStatus.status === 'inactive' || projectStatus.status === 'error') {
+                    console.log('Project is inactive or in error state, attempting to activate...');
+                    try {
+                      const activationResult = await apiClient.activateProject(projectId);
+                      console.log('Activation result:', activationResult);
+                      
+                      if (activationResult.preview_url) {
+                        setPreviewUrl(activationResult.preview_url);
+                        setStatus(prev => prev ? {
+                          ...prev,
+                          preview_url: activationResult.preview_url,
+                          status: 'ready',
+                        } : {
+                          id: projectId,
+                          status: 'ready',
+                          preview_url: activationResult.preview_url,
+                          error: null,
+                          created_at: new Date().toISOString(),
+                        });
+                      } else {
+                        // Activation started but no preview URL yet, will be polled
+                        console.log('Activation started, preview URL will be available soon');
+                        setStatus(prev => prev ? {
+                          ...prev,
+                          status: 'starting_server',
+                        } : {
+                          id: projectId,
+                          status: 'starting_server',
+                          preview_url: null,
+                          error: null,
+                          created_at: new Date().toISOString(),
+                        });
+                      }
+                    } catch (activateError) {
+                      console.error('Failed to activate project:', activateError);
+                      showNotification('error', 'Activation failed', activateError instanceof Error ? activateError.message : 'Unknown error');
+                    }
+                  } else if (projectStatus.status === 'ready') {
+                    // Project is ready but no preview URL - this is a backend issue
+                    console.warn('Project is ready but preview URL is not available. This may indicate the server is still starting or the tunnel is being created.');
+                    showNotification('warning', 'Preview URL not ready', 'The project is ready but the preview URL is still being generated. Please wait a moment and try again.');
+                  } else {
+                    // Project is in a transitional state (starting_server, creating_tunnel, etc.)
+                    console.log('Project is in transitional state:', projectStatus.status);
+                    setStatus(projectStatus);
+                    showNotification('info', 'Project starting', `Status: ${projectStatus.status}. Preview URL will be available soon.`);
+                  }
+                } catch (error) {
+                  console.error('Failed to get project status on retry:', error);
+                  showNotification('error', 'Status check failed', error instanceof Error ? error.message : 'Unknown error');
+                }
               }
             }}
             onDownload={handleDownload}
@@ -968,6 +1322,110 @@ export default function Home() {
           suggestion={notification.suggestion}
           onClose={() => setNotification({ ...notification, show: false })}
         />
+      )}
+
+      {/* Metrics Panel */}
+      {showMetrics && (
+        <>
+          <div 
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50" 
+            onClick={() => setShowMetrics(false)}
+          />
+          <div className="fixed right-4 top-20 bottom-4 w-96 z-50 bg-gray-900 border-2 border-orange-500/50 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+            <div className="p-4 border-b border-orange-500/30 bg-gradient-to-r from-orange-500/10 to-yellow-500/10">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                  <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                  System Metrics
+                </h3>
+                <button
+                  onClick={() => setShowMetrics(false)}
+                  className="p-1 hover:bg-gray-800 rounded-lg text-gray-400 hover:text-white transition-all"
+                >
+                  <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {metrics ? (
+                <>
+                  {/* System Resources */}
+                  <div className="bg-gray-800/50 rounded-lg p-4 border border-orange-500/20">
+                    <h4 className="text-sm font-semibold text-orange-400 mb-3">System Resources</h4>
+                    <div className="space-y-3">
+                      <div>
+                        <div className="flex justify-between text-xs text-gray-400 mb-1">
+                          <span>CPU Usage</span>
+                          <span>{metrics.cpu_percent?.toFixed(1) || 0}%</span>
+                        </div>
+                        <div className="w-full bg-gray-700 rounded-full h-2">
+                          <div 
+                            className="bg-orange-500 h-2 rounded-full transition-all"
+                            style={{ width: `${Math.min(metrics.cpu_percent || 0, 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-xs text-gray-400 mb-1">
+                          <span>Memory Usage</span>
+                          <span>{metrics.memory_percent?.toFixed(1) || 0}%</span>
+                        </div>
+                        <div className="w-full bg-gray-700 rounded-full h-2">
+                          <div 
+                            className="bg-yellow-500 h-2 rounded-full transition-all"
+                            style={{ width: `${Math.min(metrics.memory_percent || 0, 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-xs text-gray-400 mb-1">
+                          <span>Disk Usage</span>
+                          <span>{metrics.disk_percent?.toFixed(1) || 0}%</span>
+                        </div>
+                        <div className="w-full bg-gray-700 rounded-full h-2">
+                          <div 
+                            className="bg-red-500 h-2 rounded-full transition-all"
+                            style={{ width: `${Math.min(metrics.disk_percent || 0, 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Project Statistics */}
+                  <div className="bg-gray-800/50 rounded-lg p-4 border border-orange-500/20">
+                    <h4 className="text-sm font-semibold text-orange-400 mb-3">Project Statistics</h4>
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-gray-300">Active Projects</span>
+                        <span className="text-lg font-bold text-orange-400">{metrics.active_projects || 0}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-gray-300">Total Created</span>
+                        <span className="text-lg font-bold text-yellow-400">{metrics.total_projects_created || 0}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-gray-300">Avg Generation Time</span>
+                        <span className="text-lg font-bold text-green-400">
+                          {metrics.average_generation_time ? `${(metrics.average_generation_time / 60).toFixed(1)} min` : 'N/A'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="flex items-center justify-center h-32">
+                  <div className="text-gray-400">Loading metrics...</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </>
       )}
 
       {/* Template Browser Modal */}
