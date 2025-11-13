@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
+import LogsPanel, { LogEntry } from '@/components/LogsPanel';
+import { logger } from '@/lib/logger';
 
 interface FileNode {
   name: string;
@@ -36,6 +38,8 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
   const [terminalHeight, setTerminalHeight] = useState(200);
   const [terminalLogs, setTerminalLogs] = useState<Array<{type: 'info' | 'error' | 'success' | 'warning', message: string, timestamp: Date}>>([]);
   const [isResizing, setIsResizing] = useState(false);
+  const [viewMode, setViewMode] = useState<'files' | 'logs'>('files');
+  const [appLogs, setAppLogs] = useState<LogEntry[]>([]);
   const editorRef = useRef<any>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
 
@@ -115,7 +119,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     // Poll for project status every 15 seconds
     const pollInterval = setInterval(async () => {
       try {
-        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/project-status/${projectId}`);
+        const response = await fetch(`/api/project-status/${projectId}`);
         if (response.ok) {
           const data = await response.json();
           
@@ -153,6 +157,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
   }, [terminalLogs]);
 
   const toggleFolder = (path: string) => {
+    logger.buttonClick('Toggle Folder', { path });
     const newExpanded = new Set(expandedFolders);
     if (newExpanded.has(path)) {
       newExpanded.delete(path);
@@ -196,7 +201,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     }]);
     
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/files/${projectId}/${selectedFile}`, {
+      const response = await fetch(`/api/files/${projectId}/${selectedFile}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: fileContent }),
@@ -231,7 +236,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     if (!projectId || !newFileName.trim()) return;
     
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/files/${projectId}`, {
+      const response = await fetch(`/api/files/${projectId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -256,7 +261,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     if (!projectId || !confirm(`Delete ${path}?`)) return;
     
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/files/${projectId}/${path}`, {
+      const response = await fetch(`/api/files/${projectId}/${path}`, {
         method: 'DELETE',
       });
       
@@ -278,7 +283,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     if (!projectId || !renameTarget || !renameValue.trim()) return;
     
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/files/${projectId}/${renameTarget}/rename`, {
+      const response = await fetch(`/api/files/${projectId}/${renameTarget}/rename`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ new_name: renameValue }),
@@ -346,7 +351,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
   const getImageUrl = (filePath: string) => {
     if (!projectId) return '';
     // Construct URL to serve the image from backend
-    return `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/files/${projectId}/${filePath}`;
+    return `/api/files/${projectId}/${filePath}`;
   };
 
   const getFileIcon = (fileName: string) => {
@@ -529,7 +534,47 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
 
         {/* Code View with improved styling */}
         <div className="flex-1 flex flex-col overflow-hidden bg-gradient-to-b from-gray-900 via-gray-900 to-black">
-          {selectedFile ? (
+          {/* View Mode Toggle */}
+          <div className="flex items-center border-b-2 border-orange-500/40 bg-gradient-to-r from-black via-gray-900 to-black shadow-md">
+            <button
+              onClick={() => {
+                setViewMode('files');
+                logger.buttonClick('View Mode: Files');
+              }}
+              className={`px-4 py-2 text-sm font-medium transition-all ${
+                viewMode === 'files'
+                  ? 'bg-gradient-to-b from-gray-800 to-gray-900 text-white border-t-2 border-t-orange-500'
+                  : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
+              }`}
+            >
+              📁 Files
+            </button>
+            <button
+              onClick={() => {
+                setViewMode('logs');
+                logger.buttonClick('View Mode: Logs');
+              }}
+              className={`px-4 py-2 text-sm font-medium transition-all border-l border-orange-500/30 ${
+                viewMode === 'logs'
+                  ? 'bg-gradient-to-b from-gray-800 to-gray-900 text-white border-t-2 border-t-orange-500'
+                  : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
+              }`}
+            >
+              📋 Logs
+            </button>
+          </div>
+
+          {viewMode === 'logs' ? (
+            <LogsPanel 
+              logs={appLogs} 
+              onClear={() => {
+                logger.clear();
+                setAppLogs([]);
+              }}
+              projectId={projectId}
+              showBackendLogs={!!projectId}
+            />
+          ) : selectedFile ? (
             <>
               {/* File Tabs with improved styling */}
               <div className="flex items-center border-b-2 border-orange-500/40 bg-gradient-to-r from-black via-gray-900 to-black overflow-x-auto shadow-md">

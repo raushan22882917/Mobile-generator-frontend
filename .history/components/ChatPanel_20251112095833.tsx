@@ -96,10 +96,11 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     setIsAnalyzing(true);
     
     try {
-      const response = await fetch('/api/analyze-prompt', {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/analyze-prompt`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
+          'X-API-Key': 'dev-key-12345'
         },
         body: JSON.stringify({ 
           prompt: input.trim()
@@ -107,8 +108,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
       });
 
       if (!response.ok) {
-        // Endpoint doesn't exist or failed - silently continue without suggestions
-        return false;
+        throw new Error('Failed to analyze prompt');
       }
 
       const data = await response.json();
@@ -123,6 +123,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     } catch (error: any) {
       // Silently fail - don't log errors for missing endpoint
       // Continue with generation even if analysis fails
+      setSuggestions(null);
       return false;
     } finally {
       setIsAnalyzing(false);
@@ -180,10 +181,11 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     }
 
     try {
-      const response = await fetch('/api/apply-template', {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/apply-template`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
+          'X-API-Key': 'dev-key-12345'
         },
         body: JSON.stringify({ 
           project_id: projectId,
@@ -214,10 +216,11 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     
     try {
       // Use the chat/edit endpoint which is more reliable
-      const response = await fetch('/api/chat/edit', {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/chat/edit`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
+          'X-API-Key': 'dev-key-12345'
         },
         body: JSON.stringify({ 
           prompt: input.trim(),
@@ -257,7 +260,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     setIsGeneratingImage(true);
     
     try {
-      const response = await fetch('/api/generate-image', {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/generate-image`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -313,7 +316,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     if (!projectId) return;
 
     try {
-      const response = await fetch('/api/save-image', {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/save-image`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -336,7 +339,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     if (!projectId || !newFilename.trim()) return;
 
     try {
-      const response = await fetch('/api/rename-image', {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/rename-image`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -379,7 +382,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
 
   const loadTemplates = async () => {
     try {
-      const response = await fetch('/api/templates');
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/templates`);
       if (response.ok) {
         const data = await response.json();
         setTemplates(data.templates || []);
@@ -393,7 +396,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     if (!projectId) return;
     
     try {
-      const response = await fetch(`/api/files/${projectId}`);
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/files/${projectId}`);
       if (response.ok) {
         const data = await response.json();
         const items = extractFileItems(data.file_tree || []);
@@ -827,10 +830,10 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
                       {/* UI Preview - Live HTML */}
                       <div className="mb-4 rounded-lg overflow-hidden border-2" style={{ borderColor: template.colors.border }}>
                         <iframe
-                          src={`/api/template-preview/${template.id}`}
+                          src={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/template-preview/${template.id}`}
                           className="w-full h-64 border-0"
                           title={`${template.name} Preview`}
-                          sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                          sandbox="allow-same-origin"
                         />
                       </div>
                       

@@ -30,7 +30,7 @@ export default function ProjectSelector({ onSelectProject, currentProjectId }: P
     setError(null);
     
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/projects`);
+      const response = await fetch('/api/projects');
       
       if (!response.ok) {
         throw new Error('Failed to load projects');

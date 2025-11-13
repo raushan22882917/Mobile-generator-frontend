@@ -7,6 +7,8 @@ import PreviewFrame from '@/components/PreviewFrame';
 import ProjectSelector from '@/components/ProjectSelector';
 import Notification, { NotificationType } from '@/components/Notification';
 import { apiClient, ProjectStatus } from '@/lib/api-client';
+import { logger } from '@/lib/logger';
+import { GenerationWebSocketClient } from '@/lib/websocket-client';
 
 interface NotificationState {
   show: boolean;
@@ -57,6 +59,8 @@ export default function Home() {
   const [previewKey, setPreviewKey] = useState(0);
   const fileWatchIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const generationWsRef = useRef<GenerationWebSocketClient | null>(null);
+  const [generationProgress, setGenerationProgress] = useState<{ progress: number; message: string } | null>(null);
 
   const handleEdit = async (promptText: string) => {
     if (!projectId) return;
@@ -113,7 +117,15 @@ export default function Home() {
   };
 
   const handleGenerate = async (promptText: string, templateId?: string | null) => {
+    logger.buttonClick('Generate App', { prompt: promptText, templateId });
     setIsGenerating(true);
+    setGenerationProgress(null);
+    
+    // Clean up any existing generation WebSocket
+    if (generationWsRef.current) {
+      generationWsRef.current.disconnect();
+      generationWsRef.current = null;
+    }
     
     // Add user message
     const userMessage: Message = {
@@ -124,59 +136,226 @@ export default function Home() {
     };
     setMessages(prev => [...prev, userMessage]);
 
+    let currentProjectId: string | null = null;
+    
     try {
-      // Start generation
-      const response = await apiClient.generate({ 
+      logger.info('Starting app generation (fast mode)', { prompt: promptText, templateId });
+      
+      // Use fast-generate endpoint
+      const response = await apiClient.fastGenerate({ 
         prompt: promptText,
-        template_id: templateId || undefined
+        template_id: templateId || undefined,
+        user_id: 'user123', // You can make this dynamic based on auth
       });
       
       if (response.status === 'error') {
-        throw new Error(response.error || 'Generation failed');
+        const errorMsg = response.error || 'Generation failed';
+        logger.error('Generation failed', { error: errorMsg, response }, 'API');
+        throw new Error(errorMsg);
       }
-
-      setProjectId(response.project_id);
+      
+      logger.success('App generation started', { projectId: response.project_id }, 'API');
+      currentProjectId = response.project_id;
+      setProjectId(currentProjectId);
       
       // Add assistant message
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: `Creating your app... Project ID: ${response.project_id.substring(0, 8)}`,
+        content: `🚀 Starting generation... Project ID: ${response.project_id.substring(0, 8)}`,
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, assistantMessage]);
 
-      // Poll for status updates
-      const finalStatus = await apiClient.pollStatus(response.project_id, {
-        onStatusUpdate: (status) => {
-          setStatus(status);
+      // Get backend URL for WebSocket connection
+      const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'https://mobile-generator-backend-1098053868371.us-central1.run.app';
+      const wsUrl = `${backendUrl}${response.websocket_url}`;
+
+      // Connect to WebSocket for real-time updates
+      generationWsRef.current = new GenerationWebSocketClient(wsUrl, {
+        onOpen: () => {
+          console.log('Generation WebSocket connected');
+        },
+        onProgress: (progress, message) => {
+          console.log(`Progress: ${progress}% - ${message}`);
+          setGenerationProgress({ progress, message });
+          
+          // Update status based on progress, but preserve existing preview_url if set
+          let status: ProjectStatus['status'] = 'initializing';
+          if (progress >= 5 && progress < 15) status = 'initializing';
+          else if (progress >= 15 && progress < 35) status = 'generating_code';
+          else if (progress >= 35 && progress < 45) status = 'installing_deps';
+          else if (progress >= 45 && progress < 60) status = 'starting_server';
+          else if (progress >= 60 && progress < 85) status = 'creating_tunnel';
+          else if (progress >= 85) status = 'ready';
+          
+          // Preserve existing preview_url if already set
+          setStatus(prev => ({
+            id: currentProjectId || prev?.id || 'unknown',
+            status,
+            preview_url: prev?.preview_url || null,
+            error: null,
+            created_at: prev?.created_at || new Date().toISOString(),
+          }));
+        },
+        onPreviewReady: async (previewUrl) => {
+          console.log('Preview ready callback triggered with URL:', previewUrl);
+          
+          // Validate preview URL
+          if (!previewUrl || typeof previewUrl !== 'string') {
+            console.error('Invalid preview URL received:', previewUrl);
+            return;
+          }
+          
+          // Ensure URL is properly formatted
+          let validUrl = previewUrl;
+          try {
+            // Try to create URL object to validate
+            new URL(previewUrl);
+          } catch (e) {
+            // If URL parsing fails, try to fix it
+            if (previewUrl.startsWith('//')) {
+              validUrl = `https:${previewUrl}`;
+            } else if (!previewUrl.startsWith('http')) {
+              validUrl = `https://${previewUrl}`;
+            }
+            console.log('Fixed preview URL format:', validUrl);
+          }
+          
+          console.log('Setting preview URL:', validUrl);
+          setPreviewUrl(validUrl);
+          
+          setStatus(prev => ({
+            ...prev,
+            id: currentProjectId || prev?.id || 'unknown',
+            status: 'ready',
+            preview_url: validUrl,
+            error: null,
+            created_at: prev?.created_at || new Date().toISOString(),
+          }));
+          
+          // Load file tree
+          if (currentProjectId) {
+            await loadFileTree(currentProjectId);
+          }
+          
+          // Add preview ready message
+          const previewMessage: Message = {
+            id: (Date.now() + 2).toString(),
+            role: 'assistant',
+            content: `✅ Preview ready! Your app is now available.\n\nPreview URL: ${validUrl}`,
+            timestamp: new Date(),
+          };
+          setMessages(prev => [...prev, previewMessage]);
+          
+          showNotification('success', 'Preview ready!', 'Your app is now available in the preview');
+        },
+        onComplete: async (data) => {
+          console.log('Generation complete:', data);
+          
+          // Extract preview URL from complete message
+          const previewUrlFromComplete = data?.preview_url || data?.previewUrl || data?.url;
+          
+          // Set preview URL if available and not already set
+          setStatus(prev => {
+            const finalPreviewUrl = prev?.preview_url || previewUrlFromComplete || null;
+            
+            if (previewUrlFromComplete && !prev?.preview_url) {
+              console.log('Setting preview URL from complete message:', previewUrlFromComplete);
+              setPreviewUrl(previewUrlFromComplete);
+            }
+            
+            return {
+              id: currentProjectId || prev?.id || 'unknown',
+              status: 'ready',
+              preview_url: finalPreviewUrl,
+              error: null,
+              created_at: prev?.created_at || new Date().toISOString(),
+            };
+          });
+          
+          // Load file tree
+          if (currentProjectId) {
+            await loadFileTree(currentProjectId);
+          }
+          
+          // Add completion message
+          const completeMessage: Message = {
+            id: (Date.now() + 3).toString(),
+            role: 'assistant',
+            content: `🎉 Generation complete! Your app is ready.\n\n${data.preview_url ? `Preview URL: ${data.preview_url}` : 'Project ID: ' + currentProjectId}`,
+            timestamp: new Date(),
+          };
+          setMessages(prev => [...prev, completeMessage]);
+          
+          showNotification('success', 'App ready!', 'Your app generation is complete');
+          setIsGenerating(false);
+          setGenerationProgress(null);
+        },
+        onError: (error) => {
+          console.error('WebSocket error:', error);
+          const errorMessage = error || 'Generation failed';
+          
+          setStatus({
+            id: currentProjectId || projectId || 'unknown',
+            status: 'error',
+            preview_url: null,
+            error: errorMessage,
+            created_at: new Date().toISOString(),
+          });
+          
+          const errorMsg: Message = {
+            id: (Date.now() + 4).toString(),
+            role: 'assistant',
+            content: `❌ Error: ${errorMessage}`,
+            timestamp: new Date(),
+          };
+          setMessages(prev => [...prev, errorMsg]);
+          
+          showNotification('error', errorMessage, 'Please try again');
+          setIsGenerating(false);
+          setGenerationProgress(null);
+        },
+        onClose: () => {
+          console.log('Generation WebSocket closed');
         },
       });
 
-      setStatus(finalStatus);
-
-      if (finalStatus.status === 'ready' && finalStatus.preview_url) {
-        setPreviewUrl(finalStatus.preview_url);
-        
-        // Load file tree
-        await loadFileTree(response.project_id);
-        
-        // Add success message
-        const successMessage: Message = {
-          id: (Date.now() + 2).toString(),
-          role: 'assistant',
-          content: `✅ Your app is ready! Preview URL: ${finalStatus.preview_url}`,
-          timestamp: new Date(),
-        };
-        setMessages(prev => [...prev, successMessage]);
-        
-        showNotification('success', 'App ready!', 'Your app is now available in the preview');
-      } else if (finalStatus.status === 'error') {
-        throw new Error(finalStatus.error || 'Generation failed');
-      }
+      generationWsRef.current.connect();
+      
     } catch (error: any) {
       console.error('Generation error:', error);
       const errorMessage = error.message || 'Failed to generate app';
+      
+      // Log the error with details
+      logger.error('App generation error', {
+        error: errorMessage,
+        statusCode: error.statusCode,
+        suggestion: error.suggestion,
+      }, 'API');
+      
+      // Provide better error messages for common issues
+      let userMessage = errorMessage;
+      let suggestion = error.suggestion;
+      
+      if (error.statusCode === 503 || errorMessage.includes('Service Unavailable') || errorMessage.includes('SERVICE_UNAVAILABLE')) {
+        userMessage = 'Backend service is currently unavailable';
+        suggestion = suggestion || 'The backend server may be temporarily overloaded or under maintenance. Please try again in a few moments.';
+      } else if (error.statusCode === 504 || errorMessage.includes('timeout')) {
+        userMessage = 'Request timed out';
+        suggestion = suggestion || 'The operation took too long. The backend may be overloaded. Please try again.';
+      }
+      
+      // Set error status if not already set
+      if (!status || status.status !== 'error') {
+        setStatus({
+          id: currentProjectId || projectId || 'unknown',
+          status: 'error',
+          preview_url: null,
+          error: userMessage,
+          created_at: new Date().toISOString(),
+        });
+      }
       
       // Add error message
       const errorMsg: Message = {
@@ -188,14 +367,14 @@ export default function Home() {
       setMessages(prev => [...prev, errorMsg]);
       
       showNotification('error', errorMessage, 'Please try again');
-    } finally {
       setIsGenerating(false);
+      setGenerationProgress(null);
     }
   };
 
   const loadFileTree = async (projId: string, silent = false) => {
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/files/${projId}`);
+      const response = await fetch(`/api/files/${projId}`);
       if (response.ok) {
         const data = await response.json();
         const newFileTree = data.file_tree || [];
@@ -301,6 +480,16 @@ export default function Home() {
     };
   }, [projectId, status?.status]);
 
+  // Cleanup generation WebSocket on unmount
+  useEffect(() => {
+    return () => {
+      if (generationWsRef.current) {
+        generationWsRef.current.disconnect();
+        generationWsRef.current = null;
+      }
+    };
+  }, []);
+
   // Handle manual refresh from preview frame
   useEffect(() => {
     const handleForceRefresh = () => {
@@ -401,7 +590,9 @@ export default function Home() {
   const handleDownload = async () => {
     if (!projectId) return;
 
+    logger.buttonClick('Download Project', { projectId });
     try {
+      logger.info('Downloading project', { projectId });
       const blob = await apiClient.download(projectId);
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -440,7 +631,7 @@ export default function Home() {
 
   const loadTemplates = async () => {
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/templates`);
+      const response = await fetch('/api/templates');
       if (response.ok) {
         const contentType = response.headers.get('content-type');
         if (contentType && contentType.includes('application/json')) {
@@ -467,7 +658,7 @@ export default function Home() {
     }
 
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/apply-template`, {
+      const response = await fetch('/api/apply-template', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -654,6 +845,12 @@ export default function Home() {
           <PreviewFrame
             url={previewUrl}
             status={currentStatus}
+            error={status?.error || undefined}
+            onRetry={() => {
+              if (projectId) {
+                handleSelectProject(projectId);
+              }
+            }}
             onDownload={handleDownload}
             projectId={projectId || undefined}
             refreshKey={previewKey}
@@ -794,10 +991,10 @@ export default function Home() {
                       {/* UI Preview */}
                       <div className="mb-4 rounded-lg overflow-hidden border-2" style={{ borderColor: template.colors.border }}>
                         <iframe
-                          src={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/template-preview/${template.id}`}
+                          src={`/api/template-preview/${template.id}`}
                           className="w-full h-64 border-0"
                           title={`${template.name} Preview`}
-                          sandbox="allow-same-origin"
+                          sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                         />
                       </div>
                       

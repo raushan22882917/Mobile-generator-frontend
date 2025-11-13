@@ -13,6 +13,13 @@ export interface GenerateResponse {
   error?: string;
 }
 
+export interface FastGenerateResponse {
+  project_id: string;
+  websocket_url: string;
+  status: 'success' | 'error';
+  error?: string;
+}
+
 export interface ProjectStatus {
   id: string;
   status: 'initializing' | 'generating_code' | 'installing_deps' | 'starting_server' | 'creating_tunnel' | 'ready' | 'error';
@@ -64,7 +71,9 @@ export class APIClient {
   private retryConfig: RetryConfig;
 
   constructor(baseURL?: string, retryConfig?: Partial<RetryConfig>) {
-    this.baseURL = baseURL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+    // Use local API routes to avoid CORS issues
+    // The Next.js API routes will proxy requests to the backend
+    this.baseURL = baseURL || '/api';
     this.retryConfig = { ...DEFAULT_RETRY_CONFIG, ...retryConfig };
     
     this.client = axios.create({
@@ -77,11 +86,26 @@ export class APIClient {
   }
 
   /**
-   * Generate a new Expo app from a prompt
+   * Generate a new Expo app from a prompt (legacy - waits for completion)
    */
   async generate(request: GenerateRequest): Promise<GenerateResponse> {
     return this.withRetry(async () => {
       const response = await this.client.post<GenerateResponse>('/generate', request);
+      return response.data;
+    });
+  }
+
+  /**
+   * Fast generate - returns immediately, processes in background
+   * Use WebSocket for real-time updates
+   */
+  async fastGenerate(request: GenerateRequest & { user_id?: string }): Promise<FastGenerateResponse> {
+    return this.withRetry(async () => {
+      const response = await this.client.post<FastGenerateResponse>('/v1/fast-generate', {
+        prompt: request.prompt,
+        user_id: request.user_id || 'anonymous',
+        template_id: request.template_id,
+      });
       return response.data;
     });
   }
@@ -127,6 +151,31 @@ export class APIClient {
         project_id: projectId,
         prompt,
       });
+      return response.data;
+    });
+  }
+
+  /**
+   * Get logs for a project
+   */
+  async getLogs(
+    projectId: string,
+    options?: {
+      hours?: number;
+      limit?: number;
+      severity?: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG';
+    }
+  ): Promise<{ logs: any[]; total?: number }> {
+    return this.withRetry(async () => {
+      const params = new URLSearchParams();
+      if (options?.hours) params.append('hours', options.hours.toString());
+      if (options?.limit) params.append('limit', options.limit.toString());
+      if (options?.severity) params.append('severity', options.severity);
+      
+      const queryString = params.toString();
+      const url = `/logs/${projectId}${queryString ? `?${queryString}` : ''}`;
+      
+      const response = await this.client.get<{ logs: any[]; total?: number }>(url);
       return response.data;
     });
   }
