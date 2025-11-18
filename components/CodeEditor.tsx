@@ -3,8 +3,6 @@
 import { useState, useEffect, useRef } from 'react';
 import Editor from '@monaco-editor/react';
 import { apiClient } from '@/lib/api-client';
-import LogsPanel, { LogEntry } from '@/components/LogsPanel';
-import { logger } from '@/lib/logger';
 
 interface FileNode {
   name: string;
@@ -35,18 +33,13 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [showTerminal, setShowTerminal] = useState(true);
-  const [terminalHeight, setTerminalHeight] = useState(200);
-  const [terminalLogs, setTerminalLogs] = useState<Array<{type: 'info' | 'error' | 'success' | 'warning', message: string, timestamp: Date}>>([]);
   const [isResizing, setIsResizing] = useState(false);
-  const [viewMode, setViewMode] = useState<'files' | 'logs'>('files');
-  const [appLogs, setAppLogs] = useState<LogEntry[]>([]);
   const editorRef = useRef<any>(null);
-  const terminalRef = useRef<HTMLDivElement>(null);
 
   // Auto-expand folders and select main file when project loads
   useEffect(() => {
-    if (fileTree.length > 0 && !selectedFile) {
+    // Only run once when fileTree is first loaded and no file is selected
+    if (fileTree.length > 0 && !selectedFile && projectId) {
       // Expand all folders by default
       const allFolders = new Set<string>();
       const collectFolders = (nodes: FileNode[]) => {
@@ -96,69 +89,23 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
       const mainFile = findMainFile(fileTree);
       if (mainFile) {
         setSelectedFile(mainFile.path);
-        setFileContent(mainFile.content || '// No content available');
+        // Load file content on demand
+        if (projectId) {
+          setFileContent('Loading...');
+          apiClient.getFileContent(projectId, mainFile.path)
+            .then(content => setFileContent(content || '// No content available'))
+            .catch(() => setFileContent('// No content available'));
+        } else {
+          setFileContent('// No content available');
+        }
         onFileSelect(mainFile.path);
       }
     }
-  }, [fileTree, projectId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileTree.length, projectId]); // Only depend on length to prevent infinite loops
 
-  // Fetch project logs and status
-  useEffect(() => {
-    if (!projectId) return;
-
-    // Add initial log
-    setTerminalLogs([{
-      type: 'info' as const,
-      message: `✓ Project ${projectId} loaded successfully`,
-      timestamp: new Date()
-    }, {
-      type: 'info' as const,
-      message: `📁 File explorer ready - ${fileTree.length} items`,
-      timestamp: new Date()
-    }]);
-
-    // Poll for project status every 15 seconds
-    const pollInterval = setInterval(async () => {
-      try {
-        const response = await fetch(`/api/project-status/${projectId}`);
-        if (response.ok) {
-          const data = await response.json();
-          
-          // Only add status log if status changed or has useful info
-          if (data.status && (data.port || data.url)) {
-            setTerminalLogs(prev => {
-              // Check if last log is similar to avoid spam
-              const lastLog = prev[prev.length - 1];
-              const newMessage = `Status: ${data.status}${data.port ? ` | Port: ${data.port}` : ''}${data.url ? ` | URL: ${data.url}` : ''}`;
-              
-              if (!lastLog || !lastLog.message.includes(newMessage)) {
-                return [...prev, {
-                  type: (data.status === 'ready' ? 'success' : 'info') as 'success' | 'info',
-                  message: newMessage,
-                  timestamp: new Date()
-                }].slice(-50); // Keep last 50 logs
-              }
-              return prev;
-            });
-          }
-        }
-      } catch (error) {
-        // Silently ignore errors
-      }
-    }, 15000);
-
-    return () => clearInterval(pollInterval);
-  }, [projectId, fileTree.length]);
-
-  // Auto-scroll terminal to bottom when new logs arrive
-  useEffect(() => {
-    if (terminalRef.current) {
-      terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
-    }
-  }, [terminalLogs]);
 
   const toggleFolder = (path: string) => {
-    logger.buttonClick('Toggle Folder', { path });
     const newExpanded = new Set(expandedFolders);
     if (newExpanded.has(path)) {
       newExpanded.delete(path);
@@ -168,15 +115,33 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
     setExpandedFolders(newExpanded);
   };
 
-  const handleFileClick = (file: FileNode) => {
+  const handleFileClick = async (file: FileNode) => {
     if (file.type === 'file') {
       setSelectedFile(file.path);
-      setFileContent(file.content || '// No content available');
+      setFileContent('Loading...'); // Show loading state
       setHasUnsavedChanges(false);
       
       // Add to open tabs if not already there
       if (!openTabs.includes(file.path)) {
         setOpenTabs([...openTabs, file.path]);
+      }
+      
+      // Load file content on demand from backend (saves memory)
+      try {
+        if (projectId) {
+          const content = await apiClient.getFileContent(projectId, file.path);
+          if (content && content.trim()) {
+            setFileContent(content);
+          } else {
+            setFileContent('// No content available');
+          }
+        } else {
+          setFileContent('// No content available');
+        }
+      } catch (error: any) {
+        console.error('Failed to load file content:', error);
+        const errorMessage = error?.message || error?.response?.data?.message || 'Unknown error';
+        setFileContent(`// Error loading file content: ${errorMessage}\n// File path: ${file.path}`);
       }
       
       onFileSelect(file.path);
@@ -195,29 +160,13 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
   const handleSaveFile = async () => {
     if (!selectedFile || !projectId) return;
     
-    setTerminalLogs(prev => [...prev, {
-      type: 'info' as const,
-      message: `Saving ${selectedFile}...`,
-      timestamp: new Date()
-    }]);
-    
     try {
       await apiClient.updateFile(projectId, selectedFile, fileContent);
       
       setHasUnsavedChanges(false);
       onFileUpdate?.(selectedFile, fileContent);
-      setTerminalLogs(prev => [...prev, {
-        type: 'success' as const,
-        message: `✓ Saved ${selectedFile}`,
-        timestamp: new Date()
-      }]);
     } catch (error: any) {
       console.error('Failed to save file:', error);
-      setTerminalLogs(prev => [...prev, {
-        type: 'error' as const,
-        message: `Error saving ${selectedFile}: ${error.message || error}`,
-        timestamp: new Date()
-      }]);
     }
   };
 
@@ -237,11 +186,6 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
       onFileChange?.();
     } catch (error: any) {
       console.error('Failed to create file:', error);
-      setTerminalLogs(prev => [...prev, {
-        type: 'error' as const,
-        message: `Failed to create ${newFileName}: ${error.message || error}`,
-        timestamp: new Date()
-      }]);
     }
   };
 
@@ -259,18 +203,8 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
       // Trigger refresh
       onFileChange?.();
       
-      setTerminalLogs(prev => [...prev, {
-        type: 'success' as const,
-        message: `✓ Deleted ${path}`,
-        timestamp: new Date()
-      }]);
     } catch (error: any) {
       console.error('Failed to delete file:', error);
-      setTerminalLogs(prev => [...prev, {
-        type: 'error' as const,
-        message: `Failed to delete ${path}: ${error.message || error}`,
-        timestamp: new Date()
-      }]);
     }
   };
 
@@ -285,18 +219,8 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
       // Trigger refresh
       onFileChange?.();
       
-      setTerminalLogs(prev => [...prev, {
-        type: 'success' as const,
-        message: `✓ Renamed ${renameTarget} to ${renameValue.trim()}`,
-        timestamp: new Date()
-      }]);
     } catch (error: any) {
       console.error('Failed to rename file:', error);
-      setTerminalLogs(prev => [...prev, {
-        type: 'error' as const,
-        message: `Failed to rename ${renameTarget}: ${error.message || error}`,
-        timestamp: new Date()
-      }]);
     }
   };
 
@@ -534,47 +458,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
 
         {/* Code View with improved styling */}
         <div className="flex-1 flex flex-col overflow-hidden bg-gradient-to-b from-gray-900 via-gray-900 to-black">
-          {/* View Mode Toggle */}
-          <div className="flex items-center border-b-2 border-orange-500/40 bg-gradient-to-r from-black via-gray-900 to-black shadow-md">
-            <button
-              onClick={() => {
-                setViewMode('files');
-                logger.buttonClick('View Mode: Files');
-              }}
-              className={`px-4 py-2 text-sm font-medium transition-all ${
-                viewMode === 'files'
-                  ? 'bg-gradient-to-b from-gray-800 to-gray-900 text-white border-t-2 border-t-orange-500'
-                  : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
-              }`}
-            >
-              📁 Files
-            </button>
-            <button
-              onClick={() => {
-                setViewMode('logs');
-                logger.buttonClick('View Mode: Logs');
-              }}
-              className={`px-4 py-2 text-sm font-medium transition-all border-l border-orange-500/30 ${
-                viewMode === 'logs'
-                  ? 'bg-gradient-to-b from-gray-800 to-gray-900 text-white border-t-2 border-t-orange-500'
-                  : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
-              }`}
-            >
-              📋 Logs
-            </button>
-          </div>
-
-          {viewMode === 'logs' ? (
-            <LogsPanel 
-              logs={appLogs} 
-              onClear={() => {
-                logger.clear();
-                setAppLogs([]);
-              }}
-              projectId={projectId}
-              showBackendLogs={!!projectId}
-            />
-          ) : selectedFile ? (
+          {selectedFile ? (
             <>
               {/* File Tabs with improved styling */}
               <div className="flex items-center border-b-2 border-orange-500/40 bg-gradient-to-r from-black via-gray-900 to-black overflow-x-auto shadow-md">
@@ -635,7 +519,7 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
               </div>
 
               {/* Content Area - Monaco Editor or Image Viewer */}
-              <div className="flex-1 overflow-hidden" style={{ height: showTerminal ? `calc(100% - ${terminalHeight}px)` : '100%' }}>
+              <div className="flex-1 overflow-hidden">
                 {selectedFile && isImageFile(selectedFile) ? (
                   /* Image Viewer */
                   <div className="h-full w-full flex items-center justify-center bg-gray-900 p-8 overflow-auto">
@@ -645,6 +529,12 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
                         alt={selectedFile.split('/').pop()}
                         className="max-w-full max-h-full object-contain rounded-lg shadow-2xl border-2 border-orange-500/30"
                         style={{ maxHeight: 'calc(100vh - 300px)' }}
+                        onError={(e) => {
+                          // Handle broken image URLs gracefully
+                          const target = e.target as HTMLImageElement;
+                          target.style.display = 'none';
+                          console.warn('Failed to load image:', getImageUrl(selectedFile));
+                        }}
                       />
                       <div className="text-center">
                         <p className="text-sm text-gray-400">
@@ -731,114 +621,6 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
                 )}
               </div>
 
-              {/* Terminal Panel */}
-              {showTerminal && (
-                <div 
-                  className="border-t-2 border-orange-500/40 bg-black flex flex-col"
-                  style={{ height: `${terminalHeight}px` }}
-                >
-                  {/* Terminal Header */}
-                  <div className="flex items-center justify-between px-4 py-2 bg-gradient-to-r from-black via-gray-900 to-black border-b border-orange-500/30">
-                    <div className="flex items-center gap-3">
-                      <svg className="h-4 w-4 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                      </svg>
-                      <span className="text-sm font-semibold text-white">Terminal</span>
-                      {projectId && (
-                        <span className="text-xs text-gray-400 bg-gray-800 px-2 py-0.5 rounded">
-                          {projectId}
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => setTerminalLogs([])}
-                        className="p-1 hover:bg-gray-800 rounded text-gray-400 hover:text-white"
-                        title="Clear terminal"
-                      >
-                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
-                      <button
-                        onClick={() => setShowTerminal(false)}
-                        className="p-1 hover:bg-gray-800 rounded text-gray-400 hover:text-white"
-                        title="Hide terminal"
-                      >
-                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Resize Handle */}
-                  <div
-                    className="h-1 bg-orange-500/20 hover:bg-orange-500/40 cursor-ns-resize transition-colors"
-                    onMouseDown={(e) => {
-                      setIsResizing(true);
-                      const startY = e.clientY;
-                      const startHeight = terminalHeight;
-                      
-                      const handleMouseMove = (e: MouseEvent) => {
-                        const delta = startY - e.clientY;
-                        const newHeight = Math.max(100, Math.min(500, startHeight + delta));
-                        setTerminalHeight(newHeight);
-                      };
-                      
-                      const handleMouseUp = () => {
-                        setIsResizing(false);
-                        document.removeEventListener('mousemove', handleMouseMove);
-                        document.removeEventListener('mouseup', handleMouseUp);
-                      };
-                      
-                      document.addEventListener('mousemove', handleMouseMove);
-                      document.addEventListener('mouseup', handleMouseUp);
-                    }}
-                  />
-
-                  {/* Terminal Content */}
-                  <div 
-                    ref={terminalRef}
-                    className="flex-1 overflow-y-auto p-3 font-mono text-xs text-gray-300 space-y-1"
-                  >
-                    {terminalLogs.length === 0 ? (
-                      <div className="text-gray-500 text-center py-8">
-                        <svg className="h-8 w-8 mx-auto mb-2 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                        </svg>
-                        <p>No logs yet. Project status will appear here.</p>
-                      </div>
-                    ) : (
-                      terminalLogs.map((log, index) => (
-                        <div key={index} className="flex items-start gap-2">
-                          <span className="text-gray-600 flex-shrink-0">
-                            {log.timestamp.toLocaleTimeString()}
-                          </span>
-                          <span className={`flex-shrink-0 ${
-                            log.type === 'error' ? 'text-red-400' :
-                            log.type === 'success' ? 'text-green-400' :
-                            log.type === 'warning' ? 'text-yellow-400' :
-                            'text-blue-400'
-                          }`}>
-                            {log.type === 'error' ? '✗' :
-                             log.type === 'success' ? '✓' :
-                             log.type === 'warning' ? '⚠' : 'ℹ'}
-                          </span>
-                          <span className={`flex-1 ${
-                            log.type === 'error' ? 'text-red-300' :
-                            log.type === 'success' ? 'text-green-300' :
-                            log.type === 'warning' ? 'text-yellow-300' :
-                            'text-gray-300'
-                          }`}>
-                            {log.message}
-                          </span>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              )}
             </>
           ) : (
             <div className="flex-1 flex items-center justify-center text-gray-500">
@@ -854,18 +636,6 @@ export default function CodeEditor({ projectId, fileTree, onFileSelect, onFileUp
             </div>
           )}
 
-          {/* Terminal Toggle Button (when hidden) */}
-          {!showTerminal && selectedFile && (
-            <button
-              onClick={() => setShowTerminal(true)}
-              className="absolute bottom-4 right-4 p-2 bg-orange-500 hover:bg-orange-600 rounded-lg shadow-lg transition-all"
-              title="Show terminal"
-            >
-              <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
-            </button>
-          )}
         </div>
       </div>
 

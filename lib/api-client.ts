@@ -1,53 +1,79 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
+import { getFirebaseIdToken } from './auth-api';
+import type {
+  FastGenerateRequest,
+  FastGenerateResponse,
+  StreamingGenerateRequest,
+  StreamingGenerateResponse,
+  ProjectStatusResponse,
+  BuildStep,
+  GenerateRequest,
+  GenerateResponse,
+  AnalyzePromptRequest,
+  AnalyzePromptResponse,
+  ChatEditRequest,
+  ChatEditResponse,
+  FileUpdate,
+  FileCreateRequest,
+  FileContentRequest,
+  FileRenameRequest,
+  GenerateScreenRequest,
+  ImageGenerateRequest,
+  ImageGenerateResponse,
+  SupabaseConfigRequest,
+  SupabaseConfigResponse,
+  SupabaseConfigStatusResponse,
+  SupabaseTestResponse,
+  ApplyTemplateRequest,
+  BuildRequest,
+  BuildResponse,
+  BuildStatusResponse,
+  ManualActivateRequest,
+  HealthResponse,
+  MetricsResponse,
+  ProjectListItem,
+  TunnelURL,
+  ErrorResponse,
+  EditorFileTree,
+} from './api-types';
 
-// Request/Response Types
-export interface GenerateRequest {
-  prompt: string;
-  userId?: string;
-  template_id?: string;
-}
-
-export interface GenerateResponse {
-  project_id: string;
-  status: 'success' | 'error';
-  error?: string;
-}
-
-export interface FastGenerateResponse {
-  project_id: string;
-  websocket_url: string;
-  status: 'success' | 'error';
-  error?: string;
-}
-
-export interface ProjectStatus {
-  id: string;
-  status: 'initializing' | 'generating_code' | 'installing_deps' | 'starting_server' | 'creating_tunnel' | 'ready' | 'error';
-  preview_url: string | null;
-  error: string | null;
-  created_at: string;
-}
-
-
-
-export interface PollingConfig {
-  intervalMs: number;
-  maxAttempts: number;
-  onStatusUpdate?: (status: ProjectStatus) => void;
-}
-
-const DEFAULT_POLLING_CONFIG: PollingConfig = {
-  intervalMs: 2000, // Poll every 2 seconds
-  maxAttempts: 150, // 5 minutes max (150 * 2s = 300s)
+// Re-export types for convenience
+export type {
+  FastGenerateRequest,
+  FastGenerateResponse,
+  StreamingGenerateRequest,
+  StreamingGenerateResponse,
+  ProjectStatusResponse,
+  BuildStep,
+  GenerateRequest,
+  GenerateResponse,
+  AnalyzePromptRequest,
+  AnalyzePromptResponse,
+  ChatEditRequest,
+  ChatEditResponse,
+  FileUpdate,
+  FileCreateRequest,
+  FileContentRequest,
+  FileRenameRequest,
+  GenerateScreenRequest,
+  ImageGenerateRequest,
+  ImageGenerateResponse,
+  SupabaseConfigRequest,
+  SupabaseConfigResponse,
+  SupabaseConfigStatusResponse,
+  SupabaseTestResponse,
+  ApplyTemplateRequest,
+  BuildRequest,
+  BuildResponse,
+  BuildStatusResponse,
+  ManualActivateRequest,
+  HealthResponse,
+  MetricsResponse,
+  ProjectListItem,
+  TunnelURL,
+  ErrorResponse,
+  EditorFileTree,
 };
-
-export interface ErrorResponse {
-  error: string;
-  message: string;
-  suggestion: string;
-  project_id?: string;
-  timestamp: string;
-}
 
 // Retry Configuration
 export interface RetryConfig {
@@ -83,39 +109,162 @@ export class APIClient {
         'Content-Type': 'application/json',
       },
     });
-  }
 
-  /**
-   * Generate a new Expo app from a prompt (legacy - waits for completion)
-   */
-  async generate(request: GenerateRequest): Promise<GenerateResponse> {
-    return this.withRetry(async () => {
-      const response = await this.client.post<GenerateResponse>('/generate', request);
-      return response.data;
-    });
+    // Add request interceptor to include auth token
+    this.client.interceptors.request.use(
+      async (config) => {
+        const token = await getFirebaseIdToken();
+        if (token) {
+          config.headers.Authorization = `Bearer ${token}`;
+        }
+        return config;
+      },
+      (error) => {
+        return Promise.reject(error);
+      }
+    );
+
+    // Track failed auth attempts to avoid infinite loops
+    let globalAuthFailureCount = 0;
+    const MAX_AUTH_FAILURES = 5; // Allow more failures before logging out
+
+    // Add response interceptor to handle 401 errors
+    this.client.interceptors.response.use(
+      (response) => {
+        // Reset failure count on successful response
+        globalAuthFailureCount = 0;
+        return response;
+      },
+      async (error: AxiosError) => {
+        const originalRequest = error.config as any;
+        
+        if (error.response?.status === 401) {
+          // Don't retry if this is already a retry
+          if (originalRequest._retry) {
+            globalAuthFailureCount++;
+            
+            // Only logout after multiple consecutive failures across all requests
+            if (globalAuthFailureCount >= MAX_AUTH_FAILURES) {
+              console.log(`Multiple auth failures (${globalAuthFailureCount}), logging out`);
+              
+              // Sign out from Firebase
+              try {
+                const { auth } = await import('@/lib/firebase');
+                const { signOut } = await import('firebase/auth');
+                if (auth && auth.currentUser) {
+                  await signOut(auth);
+                }
+              } catch (error) {
+                console.error('Error signing out from Firebase:', error);
+              }
+              
+              // Only redirect if we're not already on the login page
+              if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
+                window.location.href = '/login';
+              }
+            }
+            return Promise.reject(error);
+          }
+          
+          // Mark as retry
+          originalRequest._retry = true;
+          
+          // On 401, don't try to validate - just retry the request once
+          // The backend might have extended the token or it might be a temporary issue
+          // If it fails again, the failure counter will handle logout
+          const token = await getFirebaseIdToken();
+          if (token) {
+            // Wait a brief moment before retry (in case of race condition)
+            await new Promise(resolve => setTimeout(resolve, 100));
+            originalRequest.headers.Authorization = `Bearer ${token}`;
+            return this.client(originalRequest);
+          }
+        } else {
+          // Non-401 error - reset failure count
+          globalAuthFailureCount = 0;
+        }
+        
+        return Promise.reject(error);
+      }
+    );
   }
 
   /**
    * Fast generate - returns immediately, processes in background
    * Use WebSocket for real-time updates
+   * Endpoint: POST /api/v1/fast-generate
    */
-  async fastGenerate(request: GenerateRequest & { user_id?: string }): Promise<FastGenerateResponse> {
+  async fastGenerate(request: FastGenerateRequest): Promise<FastGenerateResponse> {
     return this.withRetry(async () => {
       const response = await this.client.post<FastGenerateResponse>('/v1/fast-generate', {
         prompt: request.prompt,
-        user_id: request.user_id || 'anonymous',
-        template_id: request.template_id,
+        user_id: request.user_id ?? 'anonymous',
+        template_id: request.template_id ?? null,
       });
       return response.data;
     });
   }
 
   /**
-   * Get the current status of a project
+   * Initiate streaming generation
+   * Endpoint: POST /api/v1/generate-stream
    */
-  async getStatus(projectId: string): Promise<ProjectStatus> {
+  async initiateStreamingGeneration(request: StreamingGenerateRequest): Promise<StreamingGenerateResponse> {
     return this.withRetry(async () => {
-      const response = await this.client.get<ProjectStatus>(`/status/${projectId}`);
+      const response = await this.client.post<StreamingGenerateResponse>('/v1/generate-stream', {
+        prompt: request.prompt,
+        user_id: request.user_id ?? 'anonymous',
+        template_id: request.template_id ?? null,
+        fast_mode: request.fast_mode ?? false,
+      });
+      return response.data;
+    });
+  }
+
+  /**
+   * Get stream status
+   * Endpoint: GET /api/v1/stream-status/{project_id}
+   */
+  async getStreamStatus(projectId: string): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.get(`/v1/stream-status/${projectId}`);
+      return response.data;
+    });
+  }
+
+  /**
+   * Get the current status of a project
+   * Endpoint: GET /status/{project_id}
+   */
+  async getStatus(projectId: string): Promise<ProjectStatusResponse> {
+    return this.withRetry(async () => {
+      const response = await this.client.get<ProjectStatusResponse>(`/status/${projectId}`);
+      return response.data;
+    });
+  }
+
+  /**
+   * Get quick status (ultra-fast status check)
+   * Endpoint: GET /quick-status/{project_id}
+   */
+  async getQuickStatus(projectId: string): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.get(`/quick-status/${projectId}`);
+      return response.data;
+    });
+  }
+
+  /**
+   * Generate a new Expo application
+   * Endpoint: POST /generate
+   */
+  async generate(request: GenerateRequest): Promise<GenerateResponse> {
+    return this.withRetry(async () => {
+      const response = await this.client.post<GenerateResponse>('/generate', {
+        prompt: request.prompt,
+        user_id: request.user_id ?? 'anonymous',
+        template_id: request.template_id ?? null,
+      });
       return response.data;
     });
   }
@@ -144,41 +293,18 @@ export class APIClient {
 
   /**
    * AI-powered file editing through chat
+   * Endpoint: POST /chat/edit
    */
-  async chatEdit(projectId: string, prompt: string): Promise<ChatEditResponse> {
+  async chatEdit(request: ChatEditRequest): Promise<ChatEditResponse> {
     return this.withRetry(async () => {
       const response = await this.client.post<ChatEditResponse>('/chat/edit', {
-        project_id: projectId,
-        prompt,
+        project_id: request.project_id,
+        prompt: request.prompt,
       });
       return response.data;
     });
   }
 
-  /**
-   * Get logs for a project
-   */
-  async getLogs(
-    projectId: string,
-    options?: {
-      hours?: number;
-      limit?: number;
-      severity?: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG';
-    }
-  ): Promise<{ logs: any[]; total?: number }> {
-    return this.withRetry(async () => {
-      const params = new URLSearchParams();
-      if (options?.hours) params.append('hours', options.hours.toString());
-      if (options?.limit) params.append('limit', options.limit.toString());
-      if (options?.severity) params.append('severity', options.severity);
-      
-      const queryString = params.toString();
-      const url = `/logs/${projectId}${queryString ? `?${queryString}` : ''}`;
-      
-      const response = await this.client.get<{ logs: any[]; total?: number }>(url);
-      return response.data;
-    });
-  }
 
   /**
    * Execute a function with automatic retry logic
@@ -239,60 +365,7 @@ export class APIClient {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  /**
-   * Poll project status until it reaches a terminal state (ready or error)
-   */
-  async pollStatus(
-    projectId: string,
-    config?: Partial<PollingConfig>
-  ): Promise<ProjectStatus> {
-    const pollingConfig = { ...DEFAULT_POLLING_CONFIG, ...config };
-    let attempts = 0;
 
-    while (attempts < pollingConfig.maxAttempts) {
-      try {
-        const status = await this.getStatus(projectId);
-        
-        // Notify callback if provided
-        if (pollingConfig.onStatusUpdate) {
-          pollingConfig.onStatusUpdate(status);
-        }
-
-        // Check if we've reached a terminal state
-        if (status.status === 'ready' || status.status === 'error') {
-          return status;
-        }
-
-        // Wait before next poll
-        await this.sleep(pollingConfig.intervalMs);
-        attempts++;
-      } catch (error) {
-        // If status endpoint fails, throw the error
-        throw error;
-      }
-    }
-
-    // Timeout reached
-    throw new Error('Status polling timed out. The project may still be processing.');
-  }
-
-  /**
-   * Generate an app and poll until completion
-   */
-  async generateAndWait(
-    request: GenerateRequest,
-    pollingConfig?: Partial<PollingConfig>
-  ): Promise<ProjectStatus> {
-    // Start generation
-    const generateResponse = await this.generate(request);
-    
-    if (generateResponse.status === 'error') {
-      throw new Error(generateResponse.error || 'Generation failed');
-    }
-
-    // Poll until complete
-    return this.pollStatus(generateResponse.project_id, pollingConfig);
-  }
 
   /**
    * Handle and format errors from the API
@@ -334,79 +407,38 @@ export class APIClient {
 
   /**
    * Analyze a prompt and return suggested screens and images
+   * Endpoint: POST /analyze-prompt
    */
-  async analyzePrompt(prompt: string): Promise<AnalyzePromptResponse> {
+  async analyzePrompt(request: AnalyzePromptRequest): Promise<AnalyzePromptResponse> {
     return this.withRetry(async () => {
-      const response = await this.client.post<AnalyzePromptResponse>('/analyze-prompt', { prompt });
-      return response.data;
-    });
-  }
-
-  /**
-   * Initiate streaming generation
-   */
-  async streamingGenerate(request: StreamingGenerateRequest): Promise<StreamingGenerateResponse> {
-    return this.withRetry(async () => {
-      const response = await this.client.post<StreamingGenerateResponse>('/v1/generate-stream', {
+      const response = await this.client.post<AnalyzePromptResponse>('/analyze-prompt', {
         prompt: request.prompt,
-        user_id: request.user_id || 'anonymous',
-        template_id: request.template_id,
-        fast_mode: request.fast_mode || false,
       });
       return response.data;
     });
   }
 
-  /**
-   * Get stream status
-   */
-  async getStreamStatus(projectId: string): Promise<StreamStatusResponse> {
-    return this.withRetry(async () => {
-      const response = await this.client.get<StreamStatusResponse>(`/v1/stream-status/${projectId}`);
-      return response.data;
-    });
-  }
+
+
 
   /**
-   * Get quick status (ultra-fast status check)
-   */
-  async getQuickStatus(projectId: string): Promise<QuickStatusResponse> {
-    return this.withRetry(async () => {
-      const response = await this.client.get<QuickStatusResponse>(`/quick-status/${projectId}`);
-      return response.data;
-    });
-  }
-
-  /**
-   * List bucket projects
-   */
-  async listBucketProjects(): Promise<BucketProjectsResponse> {
-    return this.withRetry(async () => {
-      const response = await this.client.get<BucketProjectsResponse>('/bucket-projects');
-      return response.data;
-    });
-  }
-
-  /**
-   * Download from storage
-   */
-  async downloadFromStorage(projectId: string): Promise<Blob> {
-    return this.withRetry(async () => {
-      const response = await this.client.get(`/download-from-storage/${projectId}`, {
-        responseType: 'blob',
-      });
-      return response.data;
-    });
-  }
-
-  /**
-   * Get health status
+   * Get health status (no retry for faster response)
    */
   async getHealth(): Promise<HealthResponse> {
-    return this.withRetry(async () => {
-      const response = await this.client.get<HealthResponse>('/health');
+    // Don't use retry for health checks - we want fast response
+    try {
+      const response = await this.client.get<HealthResponse>('/health', {
+        timeout: 2000, // 2 second timeout
+      });
       return response.data;
-    });
+    } catch (error) {
+      // Return a default response if health check fails
+      return {
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        active_projects: 0,
+      };
+    }
   }
 
   /**
@@ -420,71 +452,148 @@ export class APIClient {
   }
 
   /**
+   * Get all projects
+   */
+  async getAllProjects(): Promise<ProjectListItem[]> {
+    return this.withRetry(async () => {
+      const response = await this.client.get<ProjectListItem[]>('/projects');
+      return response.data;
+    });
+  }
+
+  /**
    * Generate screen
+   * Endpoint: POST /generate-screen
    */
   async generateScreen(request: GenerateScreenRequest): Promise<any> {
     return this.withRetry(async () => {
-      const response = await this.client.post('/generate-screen', request);
-      return response.data;
-    });
-  }
-
-  /**
-   * Generate image
-   */
-  async generateImage(request: ImageGenerateRequest): Promise<any> {
-    return this.withRetry(async () => {
-      const response = await this.client.post('/generate-image', request);
-      return response.data;
-    });
-  }
-
-  /**
-   * Manual activate project
-   */
-  async manualActivate(projectId: string, previewUrl: string): Promise<any> {
-    return this.withRetry(async () => {
-      const response = await this.client.post(`/projects/${projectId}/manual-activate`, {
-        preview_url: previewUrl,
+      const response = await this.client.post('/generate-screen', {
+        prompt: request.prompt,
+        project_id: request.project_id,
       });
       return response.data;
     });
   }
 
   /**
-   * Get project files
+   * Generate image
+   * Endpoint: POST /generate-image
    */
-  async getProjectFiles(projectId: string): Promise<any> {
+  async generateImage(request: ImageGenerateRequest): Promise<ImageGenerateResponse> {
     return this.withRetry(async () => {
-      const response = await this.client.get(`/files/${projectId}`);
+      const response = await this.client.post<ImageGenerateResponse>('/generate-image', {
+        prompt: request.prompt,
+        project_id: request.project_id,
+      });
       return response.data;
     });
   }
 
+
   /**
-   * Get file content
+   * Get file content using editor API
+   * Endpoint: GET /api/editor/projects/{project_id}/file?path={path}
    */
   async getFileContent(projectId: string, filePath: string): Promise<string> {
     return this.withRetry(async () => {
-      const response = await this.client.get(`/files/${projectId}/${filePath}/content`);
-      return response.data.content || response.data;
+      const response = await this.client.get(`/editor/projects/${projectId}/file`, {
+        params: { path: filePath }
+      });
+      // Handle both { content: "..." } and direct string responses
+      if (typeof response.data === 'string') {
+        return response.data;
+      }
+      return response.data.content || response.data || '';
     });
   }
 
   /**
-   * Create file
+   * Get project files (file tree)
+   * Endpoint: GET /api/editor/projects/{project_id}/files
    */
-  async createFile(projectId: string, request: FileCreateRequest): Promise<any> {
+  async getProjectFiles(projectId: string): Promise<EditorFileTree> {
     return this.withRetry(async () => {
-      const response = await this.client.post(`/files/${projectId}`, request);
+      const response = await this.client.get<EditorFileTree>(`/editor/projects/${projectId}/files`);
       return response.data;
     });
   }
 
   /**
-   * Update file
+   * Update file content using editor API
+   * Endpoint: POST /api/editor/projects/{project_id}/file
    */
   async updateFile(projectId: string, filePath: string, content: string): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.post(`/editor/projects/${projectId}/file`, {
+        path: filePath,
+        content,
+      });
+      return response.data;
+    });
+  }
+
+  /**
+   * Create file using editor API
+   * Endpoint: POST /api/editor/projects/{project_id}/create-file
+   */
+  async createFile(projectId: string, request: FileCreateRequest): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.post(`/editor/projects/${projectId}/create-file`, {
+        path: request.path,
+        type: request.type,
+        content: request.content ?? '',
+      });
+      return response.data;
+    });
+  }
+
+  /**
+   * Delete file using editor API
+   * Endpoint: DELETE /api/editor/projects/{project_id}/file?path={path}
+   */
+  async deleteFile(projectId: string, filePath: string): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.delete(`/editor/projects/${projectId}/file`, {
+        params: { path: filePath }
+      });
+      return response.data;
+    });
+  }
+
+  /**
+   * Alternative: Get file content using legacy endpoint
+   * Endpoint: GET /files/{project_id}/{file_path}/content
+   */
+  async getFileContentLegacy(projectId: string, filePath: string): Promise<string> {
+    return this.withRetry(async () => {
+      const response = await this.client.get(`/files/${projectId}/${filePath}/content`);
+      if (typeof response.data === 'string') {
+        return response.data;
+      }
+      return response.data.content || response.data || '';
+    });
+  }
+
+  /**
+   * Alternative: Create file using legacy endpoint
+   * Endpoint: POST /files/{project_id}
+   */
+  async createFileLegacy(projectId: string, request: FileCreateRequest): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.post(`/files/${projectId}`, {
+        path: request.path,
+        type: request.type,
+        content: request.content ?? '',
+      });
+      return response.data;
+    });
+  }
+
+  /**
+   * Alternative: Update file using legacy endpoint
+   * Endpoint: PUT /files/{project_id}/{file_path}
+   */
+  async updateFileLegacy(projectId: string, filePath: string, content: string): Promise<any> {
     return this.withRetry(async () => {
       const response = await this.client.put(`/files/${projectId}/${filePath}`, {
         content,
@@ -494,9 +603,10 @@ export class APIClient {
   }
 
   /**
-   * Delete file
+   * Alternative: Delete file using legacy endpoint
+   * Endpoint: DELETE /files/{project_id}/{file_path}
    */
-  async deleteFile(projectId: string, filePath: string): Promise<any> {
+  async deleteFileLegacy(projectId: string, filePath: string): Promise<any> {
     return this.withRetry(async () => {
       const response = await this.client.delete(`/files/${projectId}/${filePath}`);
       return response.data;
@@ -505,6 +615,7 @@ export class APIClient {
 
   /**
    * Rename file
+   * Endpoint: POST /files/{project_id}/{file_path}/rename
    */
   async renameFile(projectId: string, filePath: string, newName: string): Promise<any> {
     return this.withRetry(async () => {
@@ -514,124 +625,174 @@ export class APIClient {
       return response.data;
     });
   }
+
+  /**
+   * Update Supabase configuration
+   * Endpoint: PUT /projects/{project_id}/supabase-config
+   */
+  async updateSupabaseConfig(
+    projectId: string,
+    config: SupabaseConfigRequest
+  ): Promise<SupabaseConfigResponse> {
+    return this.withRetry(async () => {
+      const response = await this.client.put<SupabaseConfigResponse>(
+        `/projects/${projectId}/supabase-config`,
+        {
+          supabase_url: config.supabase_url,
+          supabase_anon_key: config.supabase_anon_key,
+        }
+      );
+      return response.data;
+    });
+  }
+
+  /**
+   * Get Supabase configuration status
+   * Endpoint: GET /projects/{project_id}/supabase-config
+   */
+  async getSupabaseConfigStatus(projectId: string): Promise<SupabaseConfigStatusResponse> {
+    return this.withRetry(async () => {
+      const response = await this.client.get<SupabaseConfigStatusResponse>(
+        `/projects/${projectId}/supabase-config`
+      );
+      return response.data;
+    });
+  }
+
+  /**
+   * Test Supabase connection
+   * Endpoint: POST /projects/{project_id}/test-supabase
+   */
+  async testSupabaseConnection(
+    projectId: string,
+    config: SupabaseConfigRequest
+  ): Promise<SupabaseTestResponse> {
+    return this.withRetry(async () => {
+      const response = await this.client.post<SupabaseTestResponse>(
+        `/projects/${projectId}/test-supabase`,
+        {
+          supabase_url: config.supabase_url,
+          supabase_anon_key: config.supabase_anon_key,
+        }
+      );
+      return response.data;
+    });
+  }
+
+  /**
+   * Apply template to project
+   * Endpoint: POST /apply-template
+   */
+  async applyTemplate(request: ApplyTemplateRequest): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.post('/apply-template', {
+        project_id: request.project_id,
+        template_id: request.template_id,
+      });
+      return response.data;
+    });
+  }
+
+  /**
+   * Get templates
+   * Endpoint: GET /api/templates or GET /templates
+   */
+  async getTemplates(): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.get('/templates');
+      return response.data;
+    });
+  }
+
+  /**
+   * Get template preview
+   * Endpoint: GET /template-preview/{template_id}
+   */
+  async getTemplatePreview(templateId: string): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.get(`/template-preview/${templateId}`);
+      return response.data;
+    });
+  }
+
+  /**
+   * Manual activate project
+   * Endpoint: POST /projects/{project_id}/manual-activate
+   */
+  async manualActivate(projectId: string, request: ManualActivateRequest): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.post(`/projects/${projectId}/manual-activate`, {
+        preview_url: request.preview_url,
+      });
+      return response.data;
+    });
+  }
+
+  /**
+   * Build project
+   * Endpoint: POST /api/build/projects/{project_id}/build
+   */
+  async buildProject(projectId: string, request?: BuildRequest): Promise<BuildResponse> {
+    return this.withRetry(async () => {
+      const response = await this.client.post<BuildResponse>(
+        `/build/projects/${projectId}/build`,
+        {
+          use_shared_deps: request?.use_shared_deps ?? true,
+          force_rebuild: request?.force_rebuild ?? false,
+        }
+      );
+      return response.data;
+    });
+  }
+
+  /**
+   * Get build status
+   * Endpoint: GET /api/build/projects/{project_id}/build-status
+   */
+  async getBuildStatus(projectId: string): Promise<BuildStatusResponse> {
+    return this.withRetry(async () => {
+      const response = await this.client.get<BuildStatusResponse>(
+        `/build/projects/${projectId}/build-status`
+      );
+      return response.data;
+    });
+  }
+
+  /**
+   * Stop build
+   * Endpoint: POST /api/build/projects/{project_id}/stop
+   */
+  async stopBuild(projectId: string): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.post(`/build/projects/${projectId}/stop`);
+      return response.data;
+    });
+  }
+
+  /**
+   * Rebuild project
+   * Endpoint: POST /api/build/projects/{project_id}/rebuild
+   */
+  async rebuildProject(projectId: string): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.post(`/build/projects/${projectId}/rebuild`);
+      return response.data;
+    });
+  }
+
+  /**
+   * List active builds
+   * Endpoint: GET /api/build/active-builds
+   */
+  async listActiveBuilds(): Promise<any> {
+    return this.withRetry(async () => {
+      const response = await this.client.get('/build/active-builds');
+      return response.data;
+    });
+  }
 }
 
-export interface ChatEditResponse {
-  success: boolean;
-  message: string;
-  files_modified: string[];
-  changes_summary: string;
-}
-
-// Additional types from API documentation
-export interface AnalyzePromptRequest {
-  prompt: string;
-}
-
-export interface AnalyzePromptResponse {
-  screens: Array<{
-    name: string;
-    description: string;
-  }>;
-  images: Array<{
-    description: string;
-    path: string;
-  }>;
-  total_screens: number;
-  total_images: number;
-}
-
-export interface StreamingGenerateRequest {
-  prompt: string;
-  user_id?: string;
-  template_id?: string;
-  fast_mode?: boolean;
-}
-
-export interface StreamingGenerateResponse {
-  project_id: string;
-  websocket_url: string;
-  message: string;
-}
-
-export interface StreamStatusResponse {
-  project_id: string;
-  status: string;
-  progress?: number;
-  message?: string;
-}
-
-export interface BucketProjectInfo {
-  project_id: string;
-  file_name: string;
-  size_mb: number;
-  created_at: string;
-  updated_at: string;
-  gcs_path: string;
-  download_url: string;
-}
-
-export interface BucketProjectsResponse {
-  total_projects: number;
-  total_size_mb: number;
-  projects: BucketProjectInfo[];
-  bucket_name: string;
-}
-
-export interface HealthResponse {
-  status: string;
-  timestamp: string;
-  active_projects: number;
-  system_metrics?: {
-    cpu_percent?: number;
-    memory_percent?: number;
-    disk_percent?: number;
-  };
-}
-
-export interface MetricsResponse {
-  cpu_percent: number;
-  memory_percent: number;
-  disk_percent: number;
-  active_projects: number;
-  total_projects_created: number;
-  average_generation_time: number;
-}
-
-export interface QuickStatusResponse {
-  project_id: string;
-  status: string;
-  has_preview: boolean;
-}
-
-export interface FileCreateRequest {
-  path: string;
-  type: string;
-  content?: string;
-}
-
-export interface FileRenameRequest {
-  new_name: string;
-}
-
-export interface FileContentRequest {
-  content: string;
-}
-
-export interface GenerateScreenRequest {
-  prompt: string;
-  project_id: string;
-}
-
-export interface ImageGenerateRequest {
-  prompt: string;
-  project_id: string;
-}
-
-export interface ManualActivateRequest {
-  preview_url: string;
-}
-
+// All types are now imported from api-types.ts
 
 // Export a default instance
 export const apiClient = new APIClient();

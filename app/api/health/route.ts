@@ -4,9 +4,9 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || 'https://mobile-generator
 
 export async function GET() {
   try {
-    // Check if backend is accessible
+    // Check if backend is accessible with fast timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 2000); // 2 second timeout for faster response
     
     let backendHealthy = false;
     try {
@@ -16,6 +16,8 @@ export async function GET() {
         headers: {
           'Content-Type': 'application/json',
         },
+        // Add cache control to prevent stale responses
+        cache: 'no-store',
       });
       clearTimeout(timeoutId);
       
@@ -25,8 +27,8 @@ export async function GET() {
       }
     } catch (backendError) {
       clearTimeout(timeoutId);
-      // Backend check failed, but frontend is still accessible
-      console.debug('Backend health check failed (non-critical):', backendError);
+      // Backend check failed quickly, return immediately
+      // Don't wait - just return that frontend is ok
     }
     
     return NextResponse.json(
@@ -34,9 +36,6 @@ export async function GET() {
         status: backendHealthy ? 'healthy' : 'ok', // 'ok' means frontend is up, backend may be down
         timestamp: new Date().toISOString(),
         active_projects: 0, // We don't track this in frontend
-        system_metrics: backendHealthy ? undefined : {
-          note: 'Backend health check unavailable'
-        }
       },
       { status: 200 }
     );

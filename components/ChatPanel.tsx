@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { apiClient } from '@/lib/api-client';
+import GenerationProgress from './GenerationProgress';
 
 interface Message {
   id: string;
@@ -30,22 +31,26 @@ interface PromptSuggestions {
   total_images: number;
 }
 
+interface GenerationStep {
+  id: string;
+  title: string;
+  description: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'error';
+  details?: string;
+}
+
 interface ChatPanelProps {
-  onSubmit: (prompt: string, templateId?: string | null) => void;
+  onSubmit: (prompt: string) => void;
   onEdit?: (prompt: string) => void;
   isLoading: boolean;
   messages: Message[];
   projectId?: string | null;
   hasActiveProject?: boolean;
   onImageGenerate?: (prompt: string) => Promise<void>;
+  generationSteps?: GenerationStep[];
+  generationProgress?: { progress: number; message: string } | null;
 }
 
-// Extend Window interface for template application
-declare global {
-  interface Window {
-    applyTemplate?: (templateId: string) => Promise<void>;
-  }
-}
 
 interface FileNode {
   name: string;
@@ -60,21 +65,20 @@ interface FileItem {
   name: string;
 }
 
-export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, projectId, hasActiveProject, onImageGenerate }: ChatPanelProps) {
+export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, projectId, hasActiveProject, onImageGenerate, generationSteps, generationProgress }: ChatPanelProps) {
   const [input, setInput] = useState('');
   const [mode, setMode] = useState<'create' | 'edit' | 'image'>('create');
   const [showFilePicker, setShowFilePicker] = useState(false);
-  const [showTemplateSelector, setShowTemplateSelector] = useState(false);
-  const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
-  const [templates, setTemplates] = useState<any[]>([]);
   const [filePickerPosition, setFilePickerPosition] = useState({ top: 0, left: 0 });
   const [fileSearchQuery, setFileSearchQuery] = useState('');
   const [availableFiles, setAvailableFiles] = useState<FileItem[]>([]);
+  const MAX_AVAILABLE_FILES = 200; // Limit available files
   const [mentionedFiles, setMentionedFiles] = useState<FileItem[]>([]);
   const [cursorPosition, setCursorPosition] = useState(0);
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
   const [generatedImages, setGeneratedImages] = useState<Array<{url: string, prompt: string, filename: string}>>([]);
+  const MAX_GENERATED_IMAGES = 20; // Limit generated images
   const [showImageRename, setShowImageRename] = useState<string | null>(null);
   const [imageRenameValue, setImageRenameValue] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -97,7 +101,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     setIsAnalyzing(true);
     
     try {
-      const data = await apiClient.analyzePrompt(input.trim());
+      const data = await apiClient.analyzePrompt({ prompt: input.trim() });
       
       // Transform API response to match component's expected format
       if (data.screens && data.screens.length > 0) {
@@ -158,45 +162,11 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
         // If analysis failed, continue with normal flow
       }
       
-      // Template is optional - allow creation without template selection
-      // Users can apply templates later if they want
-      onSubmit(input.trim(), selectedTemplate);
+      onSubmit(input.trim());
       setShowSuggestions(false);
       setSuggestions(null);
     }
     setInput('');
-  };
-
-  const handleApplyTemplate = async (templateId: string) => {
-    if (!projectId || !hasActiveProject) {
-      alert('Please create or load a project first');
-      return;
-    }
-
-    try {
-      const response = await fetch('/api/apply-template', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
-          project_id: projectId,
-          template_id: templateId
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || errorData.error || 'Failed to apply template');
-      }
-
-      const data = await response.json();
-      alert(`✅ Template Applied!\n\n${data.message || 'Template applied successfully'}\n\nFiles updated: ${data.files_updated?.length || 0}`);
-      
-    } catch (error: any) {
-      console.error('Template application error:', error);
-      alert('Failed to apply template: ' + (error.message || error));
-    }
   };
 
   const handleScreenGeneration = async () => {
@@ -226,7 +196,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
       }
       
       // Fallback to chat/edit endpoint
-      const data = await apiClient.chatEdit(projectId, input.trim());
+      const data = await apiClient.chatEdit({ project_id: projectId, prompt: input.trim() });
       
       if (data.success) {
         alert(`✅ ${data.message}\n\nFiles modified: ${data.files_modified?.length || 0}\n\n${data.changes_summary || 'Files created successfully'}`);
@@ -268,7 +238,7 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
           url: data.image_url,
           prompt: input.trim(),
           filename: data.filename
-        }]);
+        }].slice(-MAX_GENERATED_IMAGES));
 
         // Show success notification
         alert(`✅ Image Generated!\n\nFilename: ${data.filename}\nPath: ${data.path || 'Saved to project'}`);
@@ -348,42 +318,36 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
     }
   }, [projectId, hasActiveProject]);
 
-  // Load templates on mount
-  useEffect(() => {
-    loadTemplates();
-  }, []);
-
-  const loadTemplates = async () => {
-    try {
-      const response = await fetch('/api/templates');
-      if (response.ok) {
-        const data = await response.json();
-        setTemplates(data.templates || []);
-      }
-    } catch (error) {
-      console.error('Failed to load templates:', error);
-    }
-  };
 
   const loadProjectFiles = async () => {
     if (!projectId) return;
     
     try {
-      const response = await fetch(`/api/files/${projectId}`);
+      const response = await fetch(`/api/files/${projectId}`, {
+        cache: 'no-store', // Don't cache to prevent memory buildup
+      });
       if (response.ok) {
         const data = await response.json();
-        const items = extractFileItems(data.file_tree || []);
-        setAvailableFiles(items);
+        // Limit file tree before processing to save memory
+        const limitedTree = (data.file_tree || []).slice(0, 100);
+        const items = extractFileItems(limitedTree);
+        setAvailableFiles(items.slice(0, MAX_AVAILABLE_FILES));
       }
     } catch (error) {
       console.error('Failed to load files:', error);
     }
   };
 
-  const extractFileItems = (nodes: FileNode[], basePath = ''): FileItem[] => {
+  const extractFileItems = (nodes: FileNode[], basePath = '', depth = 0, maxDepth = 5): FileItem[] => {
+    // Limit recursion depth to prevent memory issues with deeply nested folders
+    if (depth > maxDepth) return [];
+    
     let items: FileItem[] = [];
     
-    for (const node of nodes) {
+    // Limit nodes processed at each level
+    const nodesToProcess = nodes.slice(0, 50);
+    
+    for (const node of nodesToProcess) {
       const fullPath = basePath ? `${basePath}/${node.name}` : node.name;
       
       // Add both files and folders
@@ -393,8 +357,19 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
         name: node.name
       });
       
-      if (node.children) {
-        items = items.concat(extractFileItems(node.children, fullPath));
+      // Stop if we've reached the limit
+      if (items.length >= MAX_AVAILABLE_FILES) {
+        return items;
+      }
+      
+      if (node.children && depth < maxDepth) {
+        const childItems = extractFileItems(node.children, fullPath, depth + 1, maxDepth);
+        items = items.concat(childItems);
+        
+        // Stop if we've reached the limit
+        if (items.length >= MAX_AVAILABLE_FILES) {
+          return items.slice(0, MAX_AVAILABLE_FILES);
+        }
       }
     }
     
@@ -527,6 +502,14 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
 
       {/* Messages with improved styling and spacing */}
       <div className="flex-1 overflow-y-auto p-6 space-y-5 bg-gradient-to-b from-transparent via-gray-900/50 to-black/50">
+        {/* Generation Progress Steps */}
+        {generationSteps && generationSteps.length > 0 && isLoading && (
+          <GenerationProgress
+            steps={generationSteps}
+            overallProgress={generationProgress?.progress || 0}
+          />
+        )}
+        
         {messages.length === 0 && generatedImages.length === 0 ? (
           <div className="text-center text-gray-500 mt-12">
             <div className="bg-gradient-to-br from-black to-gray-900 rounded-2xl p-6 w-20 h-20 mx-auto mb-4 flex items-center justify-center border-2 border-orange-500/20 shadow-xl">
@@ -639,214 +622,6 @@ export default function ChatPanel({ onSubmit, onEdit, isLoading, messages, proje
         )}
         <div ref={messagesEndRef} />
       </div>
-
-      {/* Template Selector Modal */}
-      {showTemplateSelector && (
-        <>
-          <div 
-            className="fixed inset-0 bg-black/90 backdrop-blur-sm z-40" 
-            onClick={() => setShowTemplateSelector(false)}
-          />
-          <div className="fixed inset-4 md:inset-8 lg:inset-16 z-50 bg-gray-900 border-2 border-orange-500/50 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
-            <div className="p-6 border-b border-orange-500/30 bg-gradient-to-r from-orange-500/10 to-yellow-500/10">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-2xl font-bold text-white flex items-center gap-3">
-                    <svg className="h-8 w-8 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" />
-                    </svg>
-                    Choose Your Template
-                  </h3>
-                  <p className="text-sm text-gray-400 mt-1">Select a color scheme and UI design for your app</p>
-                </div>
-                <button
-                  onClick={() => setShowTemplateSelector(false)}
-                  className="p-2 hover:bg-gray-800 rounded-lg text-gray-400 hover:text-white transition-all"
-                >
-                  <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            
-            <div className="flex-1 overflow-y-auto p-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {/* No Template Option */}
-                <div className="group relative bg-gradient-to-br from-gray-800 to-gray-900 border-2 border-gray-700 hover:border-gray-500 rounded-2xl overflow-hidden transition-all hover:shadow-xl hover:scale-105">
-                  <div className="p-6">
-                    <div className="flex items-center gap-3 mb-4">
-                      <div className="w-16 h-16 rounded-xl bg-gray-800 flex items-center justify-center border-2 border-gray-700">
-                        <svg className="h-8 w-8 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </div>
-                      <div>
-                        <h4 className="text-lg font-bold text-white">No Template</h4>
-                        <p className="text-xs text-gray-500">AI Default</p>
-                      </div>
-                    </div>
-                    
-                    <p className="text-sm text-gray-400 mb-4">Let AI choose the colors automatically based on your app description</p>
-                    
-                    <div className="flex gap-2 mb-4">
-                      <div className="flex-1 h-8 rounded bg-gray-700"></div>
-                      <div className="flex-1 h-8 rounded bg-gray-600"></div>
-                      <div className="flex-1 h-8 rounded bg-gray-500"></div>
-                    </div>
-                    
-                    <button
-                      onClick={() => {
-                        setSelectedTemplate(null);
-                        setShowTemplateSelector(false);
-                        onSubmit(input.trim(), null);
-                        setInput('');
-                      }}
-                      className="w-full py-3 bg-gray-700 hover:bg-gray-600 text-white font-semibold rounded-lg transition-all"
-                    >
-                      Select Default
-                    </button>
-                  </div>
-                </div>
-
-                {/* Template Options */}
-                {templates.map((template) => (
-                  <div 
-                    key={template.id}
-                    className="group relative rounded-2xl overflow-hidden transition-all hover:shadow-2xl hover:scale-105"
-                    style={{
-                      background: `linear-gradient(135deg, ${template.colors.background} 0%, ${template.colors.surface} 100%)`,
-                      borderWidth: '2px',
-                      borderStyle: 'solid',
-                      borderColor: template.colors.primary + '50'
-                    }}
-                  >
-                    <div className="p-6">
-                      {/* Header */}
-                      <div className="flex items-center gap-3 mb-4">
-                        <div 
-                          className="w-16 h-16 rounded-xl flex items-center justify-center shadow-lg"
-                          style={{ backgroundColor: template.colors.primary }}
-                        >
-                          <div 
-                            className="w-8 h-8 rounded-lg shadow-inner"
-                            style={{ backgroundColor: template.colors.secondary }}
-                          />
-                        </div>
-                        <div>
-                          <h4 className="text-lg font-bold" style={{ color: template.colors.text_primary }}>
-                            {template.name}
-                          </h4>
-                          <p className="text-xs" style={{ color: template.colors.text_secondary }}>
-                            {template.id}
-                          </p>
-                        </div>
-                      </div>
-                      
-                      {/* Description */}
-                      <p className="text-sm mb-4" style={{ color: template.colors.text_secondary }}>
-                        {template.description}
-                      </p>
-                      
-                      {/* Color Palette */}
-                      <div className="mb-4">
-                        <p className="text-xs font-semibold mb-2" style={{ color: template.colors.text_secondary }}>
-                          Color Palette
-                        </p>
-                        <div className="grid grid-cols-5 gap-2">
-                          <div className="space-y-1">
-                            <div 
-                              className="h-10 rounded-lg shadow-md"
-                              style={{ backgroundColor: template.colors.primary }}
-                              title="Primary"
-                            />
-                            <p className="text-xs text-center" style={{ color: template.colors.text_secondary }}>Primary</p>
-                          </div>
-                          <div className="space-y-1">
-                            <div 
-                              className="h-10 rounded-lg shadow-md"
-                              style={{ backgroundColor: template.colors.secondary }}
-                              title="Secondary"
-                            />
-                            <p className="text-xs text-center" style={{ color: template.colors.text_secondary }}>Second</p>
-                          </div>
-                          <div className="space-y-1">
-                            <div 
-                              className="h-10 rounded-lg shadow-md"
-                              style={{ backgroundColor: template.colors.accent }}
-                              title="Accent"
-                            />
-                            <p className="text-xs text-center" style={{ color: template.colors.text_secondary }}>Accent</p>
-                          </div>
-                          <div className="space-y-1">
-                            <div 
-                              className="h-10 rounded-lg shadow-md border"
-                              style={{ 
-                                backgroundColor: template.colors.surface,
-                                borderColor: template.colors.border
-                              }}
-                              title="Surface"
-                            />
-                            <p className="text-xs text-center" style={{ color: template.colors.text_secondary }}>Surface</p>
-                          </div>
-                          <div className="space-y-1">
-                            <div 
-                              className="h-10 rounded-lg shadow-md"
-                              style={{ backgroundColor: template.colors.text_primary }}
-                              title="Text"
-                            />
-                            <p className="text-xs text-center" style={{ color: template.colors.text_secondary }}>Text</p>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      {/* UI Preview - Live HTML */}
-                      <div className="mb-4 rounded-lg overflow-hidden border-2" style={{ borderColor: template.colors.border }}>
-                        <iframe
-                          src={`/api/template-preview/${template.id}`}
-                          className="w-full h-64 border-0"
-                          title={`${template.name} Preview`}
-                          sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                        />
-                      </div>
-                      
-                      {/* Select Button */}
-                      <button
-                        onClick={() => {
-                          setSelectedTemplate(template.id);
-                          setShowTemplateSelector(false);
-                          onSubmit(input.trim(), template.id);
-                          setInput('');
-                        }}
-                        className="w-full py-3 font-semibold rounded-lg transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
-                        style={{ 
-                          backgroundColor: template.colors.primary,
-                          color: template.colors.surface
-                        }}
-                      >
-                        Select {template.name}
-                      </button>
-                    </div>
-                    
-                    {/* Hover Effect Overlay */}
-                    <div 
-                      className="absolute inset-0 opacity-0 group-hover:opacity-10 transition-opacity pointer-events-none"
-                      style={{ backgroundColor: template.colors.primary }}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-            
-            {/* Footer */}
-            <div className="p-4 border-t border-orange-500/30 bg-black/50">
-              <p className="text-xs text-center text-gray-500">
-                💡 You can change the template later from the chat panel
-              </p>
-            </div>
-          </div>
-        </>
-      )}
 
       {/* Input section - Kiro-style */}
       <form onSubmit={handleSubmit} className="p-4 border-t border-gray-800 bg-gray-900">
