@@ -5,42 +5,15 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import { apiClient } from '@/lib/api-client';
 
-interface UserMenuProps {
-  projectId?: string | null;
-  onSupabaseConfigure?: () => void;
-  supabaseConfigured?: boolean;
-}
-
-export default function UserMenu({ projectId, onSupabaseConfigure, supabaseConfigured: externalSupabaseConfigured }: UserMenuProps = {}) {
+export default function UserMenu() {
   const { user, logout } = useAuth();
   const router = useRouter();
   const [isOpen, setIsOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
-  const [supabaseConfigured, setSupabaseConfigured] = useState(externalSupabaseConfigured || false);
+  const [supabaseConfigured, setSupabaseConfigured] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-
-  // Update supabaseConfigured when prop changes
-  useEffect(() => {
-    if (externalSupabaseConfigured !== undefined) {
-      setSupabaseConfigured(externalSupabaseConfigured);
-    }
-  }, [externalSupabaseConfigured]);
-
-  // Check Supabase status if projectId is provided
-  useEffect(() => {
-    if (projectId && !externalSupabaseConfigured) {
-      apiClient.getSupabaseConfigStatus(projectId)
-        .then((result) => {
-          setSupabaseConfigured(result.configured);
-        })
-        .catch((err) => {
-          console.error('Failed to check Supabase status:', err);
-          setSupabaseConfigured(false);
-        });
-    }
-  }, [projectId, externalSupabaseConfigured]);
 
   useEffect(() => {
     setMounted(true);
@@ -299,32 +272,16 @@ export default function UserMenu({ projectId, onSupabaseConfigure, supabaseConfi
                 </div>
               </button>
 
-              {/* Supabase Status - Clickable */}
-              {!supabaseConfigured && projectId && (
-                <button
-                  onClick={() => {
-                    setIsOpen(false);
-                    if (onSupabaseConfigure) {
-                      onSupabaseConfigure();
-                    } else {
-                      // Fallback: try to trigger Supabase dialog via custom event
-                      window.dispatchEvent(new CustomEvent('openSupabaseDialog'));
-                    }
-                  }}
-                  className="mx-4 my-2 px-3 py-2 bg-yellow-50 border border-yellow-200 rounded-lg hover:bg-yellow-100 hover:border-yellow-300 transition-all duration-200 w-[calc(100%-2rem)] group cursor-pointer"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-2">
-                      <svg className="h-4 w-4 text-yellow-600 group-hover:text-yellow-700 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                      </svg>
-                      <span className="text-xs font-medium text-yellow-800 group-hover:text-yellow-900">Supabase Not Configured</span>
-                    </div>
-                    <svg className="h-3 w-3 text-yellow-600 group-hover:text-yellow-700 transition-transform group-hover:translate-x-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              {/* Supabase Status */}
+              {!supabaseConfigured && (
+                <div className="mx-4 my-2 px-3 py-2 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <div className="flex items-center space-x-2">
+                    <svg className="h-4 w-4 text-yellow-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                     </svg>
+                    <span className="text-xs font-medium text-yellow-800">Supabase Not Configured</span>
                   </div>
-                </button>
+                </div>
               )}
 
               <div className="border-t border-gray-200/50 my-2"></div>

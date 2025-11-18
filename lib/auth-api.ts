@@ -186,6 +186,7 @@ export function getAuthToken(): string | null {
 
 /**
  * Get Firebase ID token for API authentication
+ * Falls back to stored auth token if Firebase user is not available
  */
 export async function getFirebaseIdToken(): Promise<string | null> {
   if (typeof window === 'undefined') return null;
@@ -193,10 +194,22 @@ export async function getFirebaseIdToken(): Promise<string | null> {
   try {
     const { auth } = await import('@/lib/firebase');
     if (auth && auth.currentUser) {
-      return await auth.currentUser.getIdToken();
+      try {
+        return await auth.currentUser.getIdToken();
+      } catch (tokenError) {
+        console.warn('Error getting Firebase ID token, falling back to stored token:', tokenError);
+        // Fall through to use stored token
+      }
     }
   } catch (error) {
-    console.error('Error getting Firebase ID token:', error);
+    console.warn('Firebase auth not available, using stored token:', error);
+    // Fall through to use stored token
+  }
+  
+  // Fallback to stored auth token for backward compatibility
+  const storedToken = localStorage.getItem('auth_token');
+  if (storedToken) {
+    return storedToken;
   }
   
   return null;

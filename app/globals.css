@@ -69,3 +69,131 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: linear-gradient(180deg, #ea580c, #ca8a04);
 }
+
+/* Aceternity UI Style Animations */
+@keyframes gradient {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.animate-gradient {
+  background-size: 200% 200%;
+  animation: gradient 8s ease infinite;
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-20px);
+  }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 20px rgba(249, 115, 22, 0.5);
+  }
+  50% {
+    opacity: 0.8;
+    box-shadow: 0 0 40px rgba(249, 115, 22, 0.8);
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 3s linear infinite;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    rgba(255, 255, 255, 0.1) 50%,
+    transparent 100%
+  );
+  background-size: 1000px 100%;
+}
+
+/* Grid Pattern Background */
+.grid-pattern {
+  background-image: 
+    linear-gradient(rgba(249, 115, 22, 0.1) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(249, 115, 22, 0.1) 1px, transparent 1px);
+  background-size: 50px 50px;
+}
+
+/* Dot Pattern Background */
+.dot-pattern {
+  background-image: radial-gradient(circle, rgba(249, 115, 22, 0.15) 1px, transparent 1px);
+  background-size: 30px 30px;
+}
+
+/* Glassmorphism */
+.glass {
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+/* Animated Border */
+@keyframes border-rotate {
+  0% {
+    border-color: rgba(249, 115, 22, 0.5);
+  }
+  25% {
+    border-color: rgba(234, 179, 8, 0.5);
+  }
+  50% {
+    border-color: rgba(249, 115, 22, 0.5);
+  }
+  75% {
+    border-color: rgba(234, 179, 8, 0.5);
+  }
+  100% {
+    border-color: rgba(249, 115, 22, 0.5);
+  }
+}
+
+.animate-border {
+  animation: border-rotate 3s linear infinite;
+}
+
+/* Hover Scale Effect */
+.hover-scale {
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.hover-scale:hover {
+  transform: scale(1.05);
+  box-shadow: 0 20px 40px rgba(249, 115, 22, 0.3);
+}
+
+/* Text Glow */
+.text-glow {
+  text-shadow: 0 0 10px rgba(249, 115, 22, 0.5),
+               0 0 20px rgba(249, 115, 22, 0.3),
+               0 0 30px rgba(249, 115, 22, 0.2);
+}

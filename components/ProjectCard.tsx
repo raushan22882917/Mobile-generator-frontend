@@ -72,7 +72,7 @@ export default function ProjectCard({ project }: ProjectCardProps) {
   return (
     <div
       onClick={handleClick}
-      className="bg-white rounded-lg border border-gray-200 overflow-hidden hover:shadow-lg hover:border-orange-300 transition-all cursor-pointer group"
+      className="bg-white rounded-xl border border-gray-200 overflow-hidden hover:shadow-xl hover:border-orange-300 transition-all cursor-pointer group transform hover:-translate-y-1"
     >
       {/* Preview Section */}
       {(project.preview_url || project.latest_tunnel_url || (project.tunnel_urls && project.tunnel_urls.length > 0)) ? (
@@ -180,15 +180,15 @@ export default function ProjectCard({ project }: ProjectCardProps) {
       {/* Card Content */}
       <div className="p-6">
         <div className="flex items-start justify-between mb-4">
-          <div className="flex-1">
-            <h3 className="text-lg font-semibold text-gray-900 mb-1 group-hover:text-orange-600 transition-colors">
+          <div className="flex-1 min-w-0">
+            <h3 className="text-lg font-bold text-gray-900 mb-1 group-hover:text-orange-600 transition-colors truncate">
               {project.name || `Project ${project.id.substring(0, 8)}`}
             </h3>
-            <p className="text-sm text-gray-500 font-mono">
+            <p className="text-xs text-gray-500 font-mono truncate">
               {project.id.substring(0, 8)}...
             </p>
           </div>
-          <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium border ${getStatusColor(project.status)}`}>
+          <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border-2 ml-2 flex-shrink-0 ${getStatusColor(project.status)}`}>
             {getStatusIcon(project.status)}
             <span className="capitalize">{project.status}</span>
           </div>

@@ -506,34 +506,7 @@ export default function ProjectDetail() {
         }
       } catch (error: any) {
         console.error('Status polling error:', error);
-        
-        // Handle 403 Forbidden - stop polling, user doesn't have access
-        if (error.statusCode === 403 || error.response?.status === 403) {
-          console.error('Access denied to project. Stopping status polling.');
-          if (statusPollIntervalRef.current) {
-            clearInterval(statusPollIntervalRef.current);
-            statusPollIntervalRef.current = null;
-          }
-          setIsGenerating(false);
-          setGenerationProgress(null);
-          showNotification('error', 'Access Denied', 'You do not have permission to access this project. It may belong to a different user.');
-          return;
-        }
-        
-        // Handle 401 Unauthorized - stop polling, need to re-authenticate
-        if (error.statusCode === 401 || error.response?.status === 401) {
-          console.error('Authentication failed. Stopping status polling.');
-          if (statusPollIntervalRef.current) {
-            clearInterval(statusPollIntervalRef.current);
-            statusPollIntervalRef.current = null;
-          }
-          setIsGenerating(false);
-          setGenerationProgress(null);
-          showNotification('error', 'Authentication Failed', 'Your session has expired. Please log in again.');
-          return;
-        }
-        
-        // Continue polling on other errors (might be temporary)
+        // Continue polling on error (might be temporary)
       }
     };
     
@@ -727,23 +700,12 @@ export default function ProjectDetail() {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
         
-        // Get auth token for the request
-        const { getFirebaseIdToken } = await import('@/lib/auth-api');
-        const token = await getFirebaseIdToken();
-        
-        // Prepare headers with auth token
-        const headers: HeadersInit = {
-          'Content-Type': 'application/json',
-        };
-        
-        if (token) {
-          headers['Authorization'] = `Bearer ${token}`;
-        }
-        
         // Add timeout and limit response size
         const response = await fetch(`/api/files/${projId}`, {
           method: 'GET',
-          headers,
+          headers: {
+            'Content-Type': 'application/json',
+          },
           signal: controller.signal,
           // Don't cache to prevent memory buildup
           cache: 'no-store',
@@ -812,38 +774,20 @@ export default function ProjectDetail() {
           // If not OK, try to get error message
           const errorData = await response.json().catch(() => ({}));
           
-          // Handle 403 Forbidden - user doesn't have access, don't retry
-          if (response.status === 403) {
-            if (!silent) {
-              console.error('Access denied to project files:', errorData);
-              showNotification('error', 'Access Denied', 'You do not have permission to access this project. It may belong to a different user.');
-            }
-            return false; // Don't retry 403 errors
-          }
-          
-          // Handle 401 Unauthorized - authentication failed, don't retry
-          if (response.status === 401) {
-            if (!silent) {
-              console.error('Authentication failed:', errorData);
-              showNotification('error', 'Authentication Failed', 'Your session has expired. Please log in again.');
-            }
-            return false; // Don't retry 401 errors
-          }
-          
           // Don't log 404s as errors if silent mode
           if (response.status !== 404 || !silent) {
             console.warn(`Failed to load file tree (attempt ${attempt}/${retries}):`, response.status, errorData);
           }
           
-          if (attempt < retries && response.status !== 404 && response.status !== 401 && response.status !== 403) {
-            // Wait before retrying (exponential backoff), but don't retry 404s, 401s, or 403s
+          if (attempt < retries && response.status !== 404) {
+            // Wait before retrying (exponential backoff), but don't retry 404s
             await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
             continue;
           } else {
             if (!silent && response.status !== 404) {
               console.error('Failed to load file tree after retries:', errorData);
             }
-            return false; // Exit on 404, 401, 403 or after all retries
+            return false; // Exit on 404 or after all retries
           }
         }
       } catch (error: any) {
@@ -1070,25 +1014,8 @@ export default function ProjectDetail() {
           if (pollAttempts < maxAttempts && !isCancelled) {
             timeoutId = setTimeout(pollForPreviewUrl, pollInterval);
           }
-        } catch (error: any) {
+        } catch (error) {
           console.error('Error polling for preview URL:', error);
-          
-          // Handle 403 Forbidden - user doesn't have access to this project
-          if (error.statusCode === 403 || error.response?.status === 403) {
-            console.error('Access denied to project. User may not own this project.');
-            showNotification('error', 'Access Denied', 'You do not have permission to access this project. It may belong to a different user.');
-            isCancelled = true; // Stop polling
-            return;
-          }
-          
-          // Handle 401 Unauthorized - token expired or invalid
-          if (error.statusCode === 401 || error.response?.status === 401) {
-            console.error('Authentication failed. Token may be expired.');
-            showNotification('error', 'Authentication Failed', 'Your session has expired. Please log in again.');
-            isCancelled = true; // Stop polling
-            return;
-          }
-          
           if (!isCancelled) {
             pollAttempts++;
             if (pollAttempts < maxAttempts) {
@@ -1326,11 +1253,7 @@ export default function ProjectDetail() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <UserMenu 
-              projectId={projectId}
-              supabaseConfigured={supabaseConfigured}
-              onSupabaseConfigure={() => setShowSupabaseDialog(true)}
-            />
+            <UserMenu />
            
             
             {projectId && (

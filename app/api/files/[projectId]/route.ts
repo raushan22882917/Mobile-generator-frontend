@@ -10,12 +10,23 @@ export async function GET(
   try {
     const { projectId } = params;
     
+    // Get Authorization header from request
+    const authHeader = request.headers.get('Authorization');
+    
+    // Prepare headers for backend request
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+      'X-API-Key': API_KEY,
+    };
+    
+    // Forward Authorization header if present
+    if (authHeader) {
+      headers['Authorization'] = authHeader;
+    }
+    
     const response = await fetch(`${BACKEND_URL}/files/${projectId}`, {
       method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': API_KEY,
-      },
+      headers,
     });
 
     if (!response.ok) {
@@ -47,12 +58,23 @@ export async function POST(
     const { projectId } = params;
     const body = await request.json();
     
+    // Get Authorization header from request
+    const authHeader = request.headers.get('Authorization');
+    
+    // Prepare headers for backend request
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+      'X-API-Key': process.env.API_KEY || 'dev-key-12345',
+    };
+    
+    // Forward Authorization header if present
+    if (authHeader) {
+      headers['Authorization'] = authHeader;
+    }
+    
     const response = await fetch(`${BACKEND_URL}/files/${projectId}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': process.env.API_KEY || 'dev-key-12345',
-      },
+      headers,
       body: JSON.stringify(body),
     });
 

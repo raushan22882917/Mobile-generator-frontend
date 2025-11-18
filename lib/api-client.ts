@@ -113,9 +113,16 @@ export class APIClient {
     // Add request interceptor to include auth token
     this.client.interceptors.request.use(
       async (config) => {
-        const token = await getFirebaseIdToken();
-        if (token) {
-          config.headers.Authorization = `Bearer ${token}`;
+        try {
+          const token = await getFirebaseIdToken();
+          if (token) {
+            config.headers.Authorization = `Bearer ${token}`;
+          } else {
+            console.warn('No authentication token available for request:', config.url);
+          }
+        } catch (error) {
+          console.error('Error getting auth token:', error);
+          // Continue without token - let the backend handle 401
         }
         return config;
       },
